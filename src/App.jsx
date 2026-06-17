@@ -1343,13 +1343,14 @@ function SettingsSheet({ state, update, theme, onClose }) {
   const csvRef = useRef(null);
   const jsonRef = useRef(null);
   const [msg, setMsg] = useState("");
-  const [code, setCode] = useState("");
+  const [code, setCode] = useState(() => localStorage.getItem("budget-sync-code") || "");
+  const [inputValue, setInputValue] = useState("");
   const [syncStatus, setSyncStatus] = useState("idle");
   const setTheme = (t) => update((s) => ({ ...s, theme: t }));
   const toggleRecurring = () => update((s) => ({ ...s, recurringIncome: !s.recurringIncome }));
 
-  const connectSync = useCallback(async (syncCode) => {
-    syncCode = (syncCode || "").trim();
+  const connectSync = useCallback(async () => {
+    let syncCode = (inputValue || "").trim();
     if (syncCode.length < 6) { setSyncStatus("error"); setMsg("Code must be at least 6 characters"); return; }
     setSyncStatus("syncing");
     try {
@@ -1357,11 +1358,12 @@ function SettingsSheet({ state, update, theme, onClose }) {
       if (r.ok) {
         localStorage.setItem("budget-sync-code", syncCode);
         setCode(syncCode);
+        setInputValue("");
         setSyncStatus("ok");
         setMsg("Sync connected!");
       } else setSyncStatus("error");
     } catch (_) { setSyncStatus("error"); }
-  }, []);
+  }, [inputValue]);
   const disconnectSync = () => {
     localStorage.removeItem("budget-sync-code");
     setCode("");
@@ -1416,9 +1418,9 @@ function SettingsSheet({ state, update, theme, onClose }) {
       ) : (
         <div className="bt-snap-save">
           <div className="bt-amount-in sm" style={{ width: "auto", flex: 1 }}>
-            <input className="bt-input bt-mono" placeholder="e.g. mick-budget-7Q2k" value={code} onChange={(e) => setCode(e.target.value)} />
+            <input className="bt-input bt-mono" placeholder="e.g. mick-budget-7Q2k" value={inputValue} onChange={(e) => setInputValue(e.target.value)} />
           </div>
-          <button type="button" className="bt-savebtn" onClick={() => connectSync(code)}>Connect</button>
+          <button type="button" className="bt-savebtn" onClick={() => connectSync()}>Connect</button>
         </div>
       )}
 
