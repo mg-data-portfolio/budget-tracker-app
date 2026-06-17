@@ -96,17 +96,17 @@ const SEED = {
 /* ------------------------------- storage ------------------------------- */
 async function loadState() {
   try {
-    if (typeof window !== "undefined" && window.storage?.get) {
-      const res = await window.storage.get(STORAGE_KEY);
-      if (res?.value) return JSON.parse(res.value);
+    if (typeof window !== "undefined" && localStorage) {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) return JSON.parse(raw);
     }
   } catch (_) { /* key not set yet */ }
   return null;
 }
 async function saveState(state) {
   try {
-    if (typeof window !== "undefined" && window.storage?.set) {
-      await window.storage.set(STORAGE_KEY, JSON.stringify(state));
+    if (typeof window !== "undefined" && localStorage) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     }
   } catch (e) { console.error("save failed", e); }
 }
