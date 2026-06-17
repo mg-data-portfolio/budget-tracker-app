@@ -110,6 +110,25 @@ async function saveState(state) {
     }
   } catch (e) { console.error("save failed", e); }
 }
+const SYNC_CODE_KEY = "budget-sync-code";
+const UPDATED_AT_KEY = STORAGE_KEY + "-updated-at";
+function getSyncCode() { try { return localStorage.getItem(SYNC_CODE_KEY) || ""; } catch (_) { return ""; } }
+function setSyncCodeLS(code) { try { code ? localStorage.setItem(SYNC_CODE_KEY, code) : localStorage.removeItem(SYNC_CODE_KEY); } catch (_) {} }
+function getLocalUpdatedAt() { try { return parseInt(localStorage.getItem(UPDATED_AT_KEY) || "0", 10) || 0; } catch (_) { return 0; } }
+function setLocalUpdatedAt(t) { try { localStorage.setItem(UPDATED_AT_KEY, String(t)); } catch (_) {} }
+async function pullRemote(code) {
+  const r = await fetch(`/api/sync?code=${encodeURIComponent(code)}`);
+  if (!r.ok) throw new Error("pull failed");
+  const j = await r.json();
+  return j.payload || null; // { data, updatedAt } | null
+}
+async function pushRemote(code, data, updatedAt) {
+  const r = await fetch(`/api/sync?code=${encodeURIComponent(code)}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data, updatedAt }),
+  });
+  if (!r.ok) throw new Error("push failed");
+}
 
 /* ------------------------------- helpers ------------------------------- */
 const eur = new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" });
@@ -340,25 +359,96 @@ function migrate(state) {
 function useBudget() {
   const [state, setState] = useState(null);
   const [ready, setReady] = useState(false);
+  const [sync, setSync] = useState({ code: getSyncCode(), status: "idle" }); // idle|syncing|ok|error
+  const updatedAtRef = useRef(0);
+  const stateRef = useRef(null);
+  const pushTimer = useRef(null);
 
+  // initial load: local first, then reconcile with remote if a code is set
   useEffect(() => {
     (async () => {
       const loaded = await loadState();
-      setState(migrate(loaded ?? SEED));
+      let data = migrate(loaded ?? SEED);
+      updatedAtRef.current = getLocalUpdatedAt() || Date.now();
+      const code = getSyncCode();
+      if (code) {
+        setSync((s) => ({ ...s, status: "syncing" }));
+        try {
+          const remote = await pullRemote(code);
+          if (remote && (remote.updatedAt || 0) > updatedAtRef.current) {
+            data = migrate(remote.data);
+            updatedAtRef.current = remote.updatedAt;
+            await saveState(data);
+            setLocalUpdatedAt(updatedAtRef.current);
+          } else {
+            await pushRemote(code, data, updatedAtRef.current);
+          }
+          setSync({ code, status: "ok" });
+        } catch (_) { setSync({ code, status: "error" }); }
+      }
+      stateRef.current = data;
+      setState(data);
       setReady(true);
     })();
   }, []);
 
-  // persist whenever state changes (kept out of the updater so it stays pure)
+  // persist locally + debounced push to cloud whenever state changes
   useEffect(() => {
-    if (ready && state) saveState(state);
+    if (!ready || !state) return;
+    stateRef.current = state;
+    updatedAtRef.current = Date.now();
+    saveState(state);
+    setLocalUpdatedAt(updatedAtRef.current);
+    const code = getSyncCode();
+    if (!code) return;
+    clearTimeout(pushTimer.current);
+    pushTimer.current = setTimeout(async () => {
+      setSync((s) => ({ ...s, status: "syncing" }));
+      try {
+        await pushRemote(code, stateRef.current, updatedAtRef.current);
+        setSync({ code, status: "ok" });
+      } catch (_) { setSync({ code, status: "error" }); }
+    }, 1000);
   }, [state, ready]);
 
   const update = useCallback((fn) => {
     setState((prev) => (typeof fn === "function" ? fn(prev) : fn));
   }, []);
 
-  return { state, ready, update };
+  // connect: validates the code, pulls remote (using it if newer) or pushes local up
+  const connectSync = useCallback(async (rawCode) => {
+    const code = (rawCode || "").trim();
+    if (code.length < 6) return { ok: false, error: "Code must be at least 6 characters" };
+    setSync({ code, status: "syncing" });
+    try {
+      const remote = await pullRemote(code);
+      if (remote && (remote.updatedAt || 0) > updatedAtRef.current) {
+        const data = migrate(remote.data);
+        updatedAtRef.current = remote.updatedAt;
+        await saveState(data);
+        setLocalUpdatedAt(updatedAtRef.current);
+        stateRef.current = data;
+        setState(data);
+      } else {
+        updatedAtRef.current = Date.now();
+        await pushRemote(code, stateRef.current, updatedAtRef.current);
+        setLocalUpdatedAt(updatedAtRef.current);
+      }
+      setSyncCodeLS(code);
+      setSync({ code, status: "ok" });
+      return { ok: true };
+    } catch (e) {
+      setSync({ code, status: "error" });
+      return { ok: false, error: "Could not reach the sync server" };
+    }
+  }, []);
+
+  const disconnectSync = useCallback(() => {
+    setSyncCodeLS("");
+    setSync({ code: "", status: "idle" });
+  }, []);
+
+  return { state, ready, update, sync, connectSync, disconnectSync };
 }
 
 /* --------------------------- derived numbers --------------------------- */
@@ -448,7 +538,7 @@ function useMonthCalc(state) {
 
 /* =============================== UI =============================== */
 export default function App() {
-  const { state, ready, update } = useBudget();
+  const { state, ready, update, sync, connectSync, disconnectSync } = useBudget();
   const calc = useMonthCalc(state);
   const [tab, setTab] = useState("overview"); // overview | activity | plan
   const [groupView, setGroupView] = useState(null);
@@ -546,7 +636,7 @@ export default function App() {
 
       {adding && <AddEntry state={state} update={update} onClose={() => setAdding(false)} />}
       {editIncome && <IncomeSheet state={state} calc={calc} update={update} onClose={() => setEditIncome(false)} />}
-      {editSettings && <SettingsSheet state={state} update={update} theme={theme} onClose={() => setEditSettings(false)} />}
+      {editSettings && <SettingsSheet state={state} update={update} theme={theme} sync={sync} connectSync={connectSync} disconnectSync={disconnectSync} onClose={() => setEditSettings(false)} />}
     </div>
   );
 }
@@ -1339,47 +1429,24 @@ function Insights({ state, calc, update, theme }) {
 }
 
 /* ------------------------------ SETTINGS ------------------------------ */
-function SettingsSheet({ state, update, theme, onClose }) {
+function SettingsSheet({ state, update, theme, sync, connectSync, disconnectSync, onClose }) {
   const csvRef = useRef(null);
   const jsonRef = useRef(null);
   const [msg, setMsg] = useState("");
-  const [syncCode, setSyncCode] = useState(() => localStorage.getItem("budget-sync-code") || "");
   const [inputCode, setInputCode] = useState("");
-  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | ok | error
 
   const setTheme = (t) => update((s) => ({ ...s, theme: t }));
   const toggleRecurring = () => update((s) => ({ ...s, recurringIncome: !s.recurringIncome }));
 
   const handleConnect = async () => {
-    const code = (inputCode || "").trim();
-    if (code.length < 6) {
-      setMsg("Code must be at least 6 characters");
-      setSyncStatus("error");
-      return;
-    }
-    setSyncStatus("syncing");
-    try {
-      const r = await fetch(`/api/sync?code=${encodeURIComponent(code)}`);
-      if (r.ok) {
-        localStorage.setItem("budget-sync-code", code);
-        setSyncCode(code);
-        setInputCode("");
-        setSyncStatus("ok");
-        setMsg("Sync connected!");
-      } else {
-        setSyncStatus("error");
-        setMsg("Sync failed");
-      }
-    } catch (e) {
-      setSyncStatus("error");
-      setMsg("Network error: " + e.message);
-    }
+    setMsg("Connecting…");
+    const res = await connectSync(inputCode);
+    if (res.ok) { setInputCode(""); setMsg("Sync connected!"); }
+    else setMsg(res.error || "Sync failed");
   };
 
   const handleDisconnect = () => {
-    localStorage.removeItem("budget-sync-code");
-    setSyncCode("");
-    setSyncStatus("idle");
+    disconnectSync();
     setMsg("");
   };
 
@@ -1419,14 +1486,14 @@ function SettingsSheet({ state, update, theme, onClose }) {
       <div className="bt-muted bt-tiny" style={{ marginBottom: 8 }}>
         Enter the same secret code on each device (laptop &amp; phone) to share one dataset.
       </div>
-      {syncCode ? (
+      {sync?.code ? (
         <>
           <div className="bt-synced">
-            <span className={"bt-syncdot " + syncStatus} />
+            <span className={"bt-syncdot " + sync.status} />
             <span className="bt-mono">
-              {syncStatus === "syncing" ? "Syncing…" : syncStatus === "error" ? "Sync error" : "Synced"}
+              {sync.status === "syncing" ? "Syncing…" : sync.status === "error" ? "Sync error — will retry" : "Synced"}
             </span>
-            <span className="bt-muted bt-mono bt-tiny" style={{ marginLeft: "auto" }}>code: {syncCode}</span>
+            <span className="bt-muted bt-mono bt-tiny" style={{ marginLeft: "auto" }}>code: {sync.code}</span>
           </div>
           <button type="button" className="bt-setbtn" onClick={handleDisconnect}>Disconnect</button>
         </>
@@ -1443,7 +1510,8 @@ function SettingsSheet({ state, update, theme, onClose }) {
           <button type="button" className="bt-savebtn" onClick={handleConnect}>Connect</button>
         </div>
       )}
-      {msg && <div className="bt-muted bt-tiny" style={{ marginBottom: "12px", color: syncStatus === "error" ? "#E0695C" : "#4FB477" }}>{msg}</div>}
+      {msg && <div className="bt-muted bt-tiny" style={{ marginBottom: "12px", color: sync?.status === "error" ? "#E0695C" : "#4FB477" }}>{msg}</div>}
+
 
       <label className="bt-field-l bt-mono" style={{ marginTop: 18 }}>Appearance</label>
       <div className="bt-seg">
