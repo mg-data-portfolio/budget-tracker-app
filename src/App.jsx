@@ -1343,8 +1343,30 @@ function SettingsSheet({ state, update, theme, onClose }) {
   const csvRef = useRef(null);
   const jsonRef = useRef(null);
   const [msg, setMsg] = useState("");
+  const [code, setCode] = useState("");
+  const [syncStatus, setSyncStatus] = useState("idle");
   const setTheme = (t) => update((s) => ({ ...s, theme: t }));
   const toggleRecurring = () => update((s) => ({ ...s, recurringIncome: !s.recurringIncome }));
+
+  const connectSync = useCallback(async (syncCode) => {
+    syncCode = (syncCode || "").trim();
+    if (syncCode.length < 6) { setSyncStatus("error"); return; }
+    setSyncStatus("syncing");
+    try {
+      const r = await fetch(`/api/sync?code=${encodeURIComponent(syncCode)}`);
+      if (r.ok) {
+        localStorage.setItem("budget-sync-code", syncCode);
+        setCode(syncCode);
+        setSyncStatus("ok");
+        setMsg("Sync connected!");
+      } else setSyncStatus("error");
+    } catch (_) { setSyncStatus("error"); }
+  }, []);
+  const disconnectSync = () => {
+    localStorage.removeItem("budget-sync-code");
+    setCode("");
+    setSyncStatus("idle");
+  };
 
   const exportCSV = () => downloadText(`budget-${new Date().toISOString().slice(0, 10)}.csv`, toCSV(state), "text/csv;charset=utf-8");
   const exportJSON = () => downloadText(`budget-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(state, null, 2), "application/json");
@@ -1378,7 +1400,29 @@ function SettingsSheet({ state, update, theme, onClose }) {
 
   return (
     <Sheet title="Settings" onClose={onClose}>
-      <label className="bt-field-l bt-mono">Appearance</label>
+      <label className="bt-field-l bt-mono">Sync across devices</label>
+      <div className="bt-muted bt-tiny" style={{ marginBottom: 8 }}>
+        Enter the same secret code on each device (laptop &amp; phone) to share one dataset.
+      </div>
+      {code ? (
+        <>
+          <div className="bt-synced">
+            <span className={"bt-syncdot " + syncStatus} />
+            <span className="bt-mono">{syncStatus === "syncing" ? "Syncing…" : syncStatus === "error" ? "Sync error" : "Synced"}</span>
+            <span className="bt-muted bt-mono bt-tiny" style={{ marginLeft: "auto" }}>code: {code}</span>
+          </div>
+          <button type="button" className="bt-setbtn" onClick={disconnectSync}>Disconnect</button>
+        </>
+      ) : (
+        <div className="bt-snap-save">
+          <div className="bt-amount-in sm" style={{ width: "auto", flex: 1 }}>
+            <input className="bt-input bt-mono" placeholder="e.g. mick-budget-7Q2k" value={code} onChange={(e) => setCode(e.target.value)} />
+          </div>
+          <button type="button" className="bt-savebtn" onClick={() => connectSync(code)}>Connect</button>
+        </div>
+      )}
+
+      <label className="bt-field-l bt-mono" style={{ marginTop: 18 }}>Appearance</label>
       <div className="bt-seg">
         <button type="button" className={theme === "dark" ? "is-on" : ""} onClick={() => setTheme("dark")}><Moon size={14} /> Dark</button>
         <button type="button" className={theme === "light" ? "is-on" : ""} onClick={() => setTheme("light")}><Sun size={14} /> Light</button>
@@ -1429,7 +1473,7 @@ function reportData(state, monthId) {
   const spent = groups.reduce((s, g) => s + g.actual, 0);
   const base = (state.plan.income.salary || 0) + (state.plan.income.other || 0);
   const ideal = { needs: income * 0.5, wants: income * 0.3, savings: income * 0.2 };
-  const fixedCats = state.categories.filter((c) => c.fixed);
+  const fixedCats = cats.filter((c) => c.fixed);
   const fixedPaid = fixedCats.filter((c) => (month.txns || []).some((t) => t.cat === c.id && t.fixed)).length;
 
   const snaps = (state.wealthSnapshots || []).slice().sort((a, b) => a.date.localeCompare(b.date));
