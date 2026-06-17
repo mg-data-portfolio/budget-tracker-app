@@ -1343,31 +1343,44 @@ function SettingsSheet({ state, update, theme, onClose }) {
   const csvRef = useRef(null);
   const jsonRef = useRef(null);
   const [msg, setMsg] = useState("");
-  const [code, setCode] = useState(() => localStorage.getItem("budget-sync-code") || "");
-  const [inputValue, setInputValue] = useState("");
-  const [syncStatus, setSyncStatus] = useState("idle");
+  const [syncCode, setSyncCode] = useState(() => localStorage.getItem("budget-sync-code") || "");
+  const [inputCode, setInputCode] = useState("");
+  const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | ok | error
+
   const setTheme = (t) => update((s) => ({ ...s, theme: t }));
   const toggleRecurring = () => update((s) => ({ ...s, recurringIncome: !s.recurringIncome }));
 
-  const connectSync = useCallback(async () => {
-    let syncCode = (inputValue || "").trim();
-    if (syncCode.length < 6) { setSyncStatus("error"); setMsg("Code must be at least 6 characters"); return; }
+  const handleConnect = async () => {
+    const code = (inputCode || "").trim();
+    if (code.length < 6) {
+      setMsg("Code must be at least 6 characters");
+      setSyncStatus("error");
+      return;
+    }
     setSyncStatus("syncing");
     try {
-      const r = await fetch(`/api/sync?code=${encodeURIComponent(syncCode)}`);
+      const r = await fetch(`/api/sync?code=${encodeURIComponent(code)}`);
       if (r.ok) {
-        localStorage.setItem("budget-sync-code", syncCode);
-        setCode(syncCode);
-        setInputValue("");
+        localStorage.setItem("budget-sync-code", code);
+        setSyncCode(code);
+        setInputCode("");
         setSyncStatus("ok");
         setMsg("Sync connected!");
-      } else setSyncStatus("error");
-    } catch (_) { setSyncStatus("error"); }
-  }, [inputValue]);
-  const disconnectSync = () => {
+      } else {
+        setSyncStatus("error");
+        setMsg("Sync failed");
+      }
+    } catch (e) {
+      setSyncStatus("error");
+      setMsg("Network error: " + e.message);
+    }
+  };
+
+  const handleDisconnect = () => {
     localStorage.removeItem("budget-sync-code");
-    setCode("");
+    setSyncCode("");
     setSyncStatus("idle");
+    setMsg("");
   };
 
   const exportCSV = () => downloadText(`budget-${new Date().toISOString().slice(0, 10)}.csv`, toCSV(state), "text/csv;charset=utf-8");
@@ -1406,23 +1419,31 @@ function SettingsSheet({ state, update, theme, onClose }) {
       <div className="bt-muted bt-tiny" style={{ marginBottom: 8 }}>
         Enter the same secret code on each device (laptop &amp; phone) to share one dataset.
       </div>
-      {code ? (
+      {syncCode ? (
         <>
           <div className="bt-synced">
             <span className={"bt-syncdot " + syncStatus} />
-            <span className="bt-mono">{syncStatus === "syncing" ? "Syncing…" : syncStatus === "error" ? "Sync error" : "Synced"}</span>
-            <span className="bt-muted bt-mono bt-tiny" style={{ marginLeft: "auto" }}>code: {code}</span>
+            <span className="bt-mono">
+              {syncStatus === "syncing" ? "Syncing…" : syncStatus === "error" ? "Sync error" : "Synced"}
+            </span>
+            <span className="bt-muted bt-mono bt-tiny" style={{ marginLeft: "auto" }}>code: {syncCode}</span>
           </div>
-          <button type="button" className="bt-setbtn" onClick={disconnectSync}>Disconnect</button>
+          <button type="button" className="bt-setbtn" onClick={handleDisconnect}>Disconnect</button>
         </>
       ) : (
-        <div className="bt-snap-save">
-          <div className="bt-amount-in sm" style={{ width: "auto", flex: 1 }}>
-            <input className="bt-input bt-mono" placeholder="e.g. mick-budget-7Q2k" value={inputValue} onChange={(e) => setInputValue(e.target.value)} />
-          </div>
-          <button type="button" className="bt-savebtn" onClick={() => connectSync()}>Connect</button>
+        <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+          <input
+            type="text"
+            className="bt-input bt-mono"
+            placeholder="e.g. mick-budget-7Q2k"
+            value={inputCode}
+            onChange={(e) => setInputCode(e.target.value)}
+            style={{ flex: 1 }}
+          />
+          <button type="button" className="bt-savebtn" onClick={handleConnect}>Connect</button>
         </div>
       )}
+      {msg && <div className="bt-muted bt-tiny" style={{ marginBottom: "12px", color: syncStatus === "error" ? "#E0695C" : "#4FB477" }}>{msg}</div>}
 
       <label className="bt-field-l bt-mono" style={{ marginTop: 18 }}>Appearance</label>
       <div className="bt-seg">
