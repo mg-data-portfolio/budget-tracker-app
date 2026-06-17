@@ -1350,7 +1350,7 @@ function SettingsSheet({ state, update, theme, onClose }) {
 
   const connectSync = useCallback(async (syncCode) => {
     syncCode = (syncCode || "").trim();
-    if (syncCode.length < 6) { setSyncStatus("error"); return; }
+    if (syncCode.length < 6) { setSyncStatus("error"); setMsg("Code must be at least 6 characters"); return; }
     setSyncStatus("syncing");
     try {
       const r = await fetch(`/api/sync?code=${encodeURIComponent(syncCode)}`);
