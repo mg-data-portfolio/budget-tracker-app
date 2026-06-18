@@ -47,7 +47,7 @@ const SEED = {
     { id: "acc-boi-dep", name: "BOI Deposit Account", kind: "asset", liquid: false },
     { id: "acc-irishlife", name: "Irish Life Savings", kind: "asset", liquid: false },
     { id: "acc-n26", name: "N26 Investment", kind: "asset", liquid: false },
-    { id: "acc-car-loan", name: "Car Loan", kind: "loan", liquid: false, loanMeta: { originalAmount: 23250, interestRate: 6.31, term: 60, disbursalDate: "2024-11-08", repaymentDay: 1, linkedCategories: ["Car Loan Repayment", "Car Loan Savings"] } },
+    { id: "acc-car-loan", name: "Car Loan", kind: "loan", liquid: false, loanMeta: { originalAmount: 23250, interestRate: 6.31, term: 60, disbursalDate: "2024-11-08", repaymentDay: 1, linkedCategories: ["Car Loan Repayment", "Car Loan Savings"], monthlyPayment: 452.82 } },
   ],
   categories: [
     { id: uid(), group: "needs", name: "Rent", planned: 200, fixed: true },
@@ -147,6 +147,26 @@ function monthMeta(id) {
 function nextMonthId(id) {
   const { y, m } = monthMeta(id);
   const d = new Date(y, m, 1); // m is 1-based → next month
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+function lastFridayOnOrBefore(year, monthIndex0, day) {
+  const d = new Date(year, monthIndex0, day);
+  while (d.getDay() !== 5) d.setDate(d.getDate() - 1);
+  return d;
+}
+// Payday for a budget month = last Friday of the previous calendar month,
+// except for January, where pay typically lands before Christmas, not New Year's Eve.
+function computePaydayDate(monthId) {
+  const { y, m } = monthMeta(monthId); // m is 1-based
+  let py = y, pm = m - 1;
+  if (pm === 0) { pm = 12; py = y - 1; }
+  if (pm === 12) {
+    return lastFridayOnOrBefore(py, 11, 25); // last Friday on/before 25 Dec
+  }
+  return lastFridayOnOrBefore(py, pm, 0); // day 0 of month `pm` (1-based) = last day of that month
+}
+function todayMonthId() {
+  const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
@@ -362,13 +382,53 @@ function migrate(state) {
     s = { ...s, months, migratedBreakdownV7: true };
   }
 
-  if (!s.migratedLoansV8) {
-    const accounts = (s.accounts || []).map(a => ({
+  if (!s.migratedLoansV9) {
+    let accounts = (s.accounts || []).map(a => ({
       ...a,
       excludeFromNetWorth: a.excludeFromNetWorth !== undefined ? a.excludeFromNetWorth : false,
-      loanMeta: a.loanMeta || null, // {originalAmount, interestRate, term, disbursalDate, repaymentDay, linkedCategories}
+      loanMeta: a.loanMeta || null, // {originalAmount, interestRate, term, disbursalDate, repaymentDay, linkedCategories, monthlyPayment}
     }));
-    s = { ...s, accounts, migratedLoansV8: true };
+    const hasCarLoan = accounts.some(a => a.id === "acc-car-loan" || a.kind === "loan");
+    let months = s.months;
+    if (!hasCarLoan) {
+      accounts = [...accounts, {
+        id: "acc-car-loan", name: "Car Loan", kind: "loan", liquid: false, excludeFromNetWorth: false,
+        loanMeta: { originalAmount: 23250, interestRate: 6.31, term: 60, disbursalDate: "2024-11-08", repaymentDay: 1, linkedCategories: ["Car Loan Repayment", "Car Loan Savings"], monthlyPayment: 452.82 },
+      }];
+      months = { ...s.months };
+      if (months[s.current]) {
+        months[s.current] = { ...months[s.current], balances: { ...months[s.current].balances, "acc-car-loan": 16707.70 } };
+      }
+    }
+    s = { ...s, accounts, months, migratedLoansV9: true };
+  }
+
+  // patch the real contractual monthly payment onto the car loan (overrides the calculated estimate)
+  if (!s.migratedLoansV10) {
+    const accounts = (s.accounts || []).map(a =>
+      a.id === "acc-car-loan" && a.loanMeta
+        ? { ...a, loanMeta: { ...a.loanMeta, monthlyPayment: 452.82 } }
+        : a
+    );
+    s = { ...s, accounts, migratedLoansV10: true };
+  }
+
+  // add May 2026 as a navigable (empty, zero-based) month before the existing earliest month.
+  // The previously-earliest month's "Starting balance" (income.prior) only had meaning because
+  // it WAS the earliest month; once May precedes it, that role passes to May, so we copy the
+  // value across to keep the existing month's calculations unchanged.
+  if (!s.migratedMay2026V11) {
+    let months = s.months;
+    if (!months["2026-05"]) {
+      const existingIds = Object.keys(months).sort();
+      const oldEarliestId = existingIds[0];
+      const preservedPrior = oldEarliestId ? (months[oldEarliestId].income.prior || 0) : 0;
+      months = {
+        ...months,
+        "2026-05": { id: "2026-05", label: monthMeta("2026-05").label, payday: "", income: { salary: 0, other: 0, prior: preservedPrior }, txns: [], incomeTxns: [], balances: {} },
+      };
+    }
+    s = { ...s, months, migratedMay2026V11: true };
   }
 
   return s;
@@ -608,6 +668,16 @@ export default function App() {
     }
   };
 
+  const thisMonthId = todayMonthId();
+  const isCurrentMonth = state.current === thisMonthId;
+  const goToCurrentMonth = () => {
+    const target = state.months[thisMonthId] ? thisMonthId : monthIds[monthIds.length - 1];
+    update((s) => ({ ...s, current: target }));
+  };
+  const paydayDate = computePaydayDate(state.current);
+  const paydayLabel = paydayDate.toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" });
+  const isPaid = paydayDate <= new Date();
+
   return (
     <div className={rootClass}>
       <Style />
@@ -619,12 +689,13 @@ export default function App() {
         <div className="bt-month">
           <div className="bt-month-name">{monthMeta(state.current).label}</div>
           <div className="bt-month-sub bt-mono">
-            {state.months[state.current].payday
-              ? `paid ${state.months[state.current].payday}`
-              : "zero-based plan"}
+            {isPaid ? "Paid: " : "Payday: "}{paydayLabel}
           </div>
         </div>
         <div className="bt-hdr-right">
+          {!isCurrentMonth && (
+            <button className="bt-todaybtn" onClick={goToCurrentMonth}>Current Month</button>
+          )}
           <button className="bt-iconbtn" onClick={() => switchMonth(1)} aria-label="Next month">
             <ChevronRight size={20} />
           </button>
@@ -1382,7 +1453,7 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
           <div className="bt-muted bt-tiny" style={{ marginBottom: 10 }}>
             Savings and investments — your longer-term wealth. Update the balances each month to track growth.
           </div>
-          {heldAccts.map(accRow)}
+          {heldAccts.filter((a) => a.kind !== "loan").map(accRow)}
           <button type="button" className="bt-add-cat" onClick={addHeld}><Plus size={14} /> Add holding</button>
           <div className="bt-recon bt-mono">
             <div><span className="bt-muted">Held assets</span><strong>{fmt(heldTotal)}</strong></div>
@@ -1423,6 +1494,20 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
               const pct = meta.originalAmount > 0 ? Math.round((paidOff / meta.originalAmount) * 100) : 0;
               const disbDate = new Date(meta.disbursalDate);
               const endDate = new Date(disbDate.getFullYear(), disbDate.getMonth() + meta.term, disbDate.getDate());
+
+              // amortization: use the real contractual monthly payment if known, otherwise estimate
+              // from the original terms, then solve remaining periods to clear the *current* balance.
+              const monthlyRate = meta.interestRate / 100 / 12;
+              const estimatedPayment = monthlyRate > 0
+                ? (meta.originalAmount * monthlyRate) / (1 - Math.pow(1 + monthlyRate, -meta.term))
+                : meta.originalAmount / meta.term;
+              const monthlyPayment = meta.monthlyPayment || estimatedPayment;
+              let remainingInterest = 0;
+              if (monthlyRate > 0 && curr > 0 && monthlyPayment > curr * monthlyRate) {
+                const remainingMonths = -Math.log(1 - (curr * monthlyRate) / monthlyPayment) / Math.log(1 + monthlyRate);
+                remainingInterest = Math.max(0, monthlyPayment * remainingMonths - curr);
+              }
+
               return (
                 <div key={loan.id} className="bt-loan-card bt-mono bt-tiny">
                   <div className="bt-loan-header">
@@ -1436,6 +1521,8 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
                     <div><span className="bt-muted">Paid off:</span> <span>{fmt(paidOff)} ({pct}%)</span></div>
                     <div><span className="bt-muted">Original:</span> <span>{fmt(meta.originalAmount)}</span></div>
                     <div><span className="bt-muted">Rate:</span> <span>{meta.interestRate}%</span></div>
+                    <div><span className="bt-muted">Monthly payment:</span> <span>{fmt(monthlyPayment)}</span></div>
+                    <div><span className="bt-muted">Interest left to pay:</span> <span>{fmt(remainingInterest)}</span></div>
                     <div><span className="bt-muted">Payoff date:</span> <span>{endDate.toLocaleDateString("en-IE", { month: "short", year: "2-digit" })}</span></div>
                   </div>
                 </div>
@@ -1911,10 +1998,12 @@ function Style() {
         gap:8px;padding:14px 16px;background:var(--header-bg);backdrop-filter:blur(12px);border-bottom:1px solid var(--line);}
       .bt-hdr-right{display:flex;align-items:center;gap:8px;}
       .bt-month{text-align:center;flex:1;min-width:0;} .bt-month-name{font-weight:600;font-size:17px;letter-spacing:.2px;}
-      .bt-month-sub{font-size:11px;color:var(--muted);margin-top:2px;text-transform:lowercase;}
+      .bt-month-sub{font-size:11px;color:var(--muted);margin-top:2px;}
       .bt-iconbtn{background:var(--surface);border:1px solid var(--line);color:var(--text);
         width:38px;height:38px;border-radius:11px;display:grid;place-items:center;flex:0 0 auto;}
       .bt-iconbtn:disabled{opacity:.35;}
+      .bt-todaybtn{background:var(--surface);border:1px solid var(--line);color:var(--accent);
+        font:inherit;font-size:12px;font-weight:600;border-radius:11px;padding:0 12px;height:38px;flex:0 0 auto;}
 
       .bt-main{padding:16px;} .bt-stack{display:flex;flex-direction:column;gap:12px;}
       .bt-insrow{display:flex;flex-direction:column;gap:12px;}
