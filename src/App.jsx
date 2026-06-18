@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import {
   Plus, ChevronLeft, ChevronRight, X, Trash2, SlidersHorizontal,
   LayoutGrid, Receipt, Check, PencilLine, BarChart3,
-  Settings, Sun, Moon, Download, Upload, FileText,
+  Settings, Sun, Moon, Download, Upload, FileText, Layers,
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -353,6 +353,14 @@ function migrate(state) {
     s = { ...s, months, migratedSalaryV2: true };
   }
 
+  if (!s.migratedBreakdownV7) {
+    const months = { ...s.months };
+    for (const id in months) {
+      months[id] = { ...months[id], balanceItems: months[id].balanceItems || {} };
+    }
+    s = { ...s, months, migratedBreakdownV7: true };
+  }
+
   return s;
 }
 
@@ -548,6 +556,10 @@ export default function App() {
   const theme = state?.theme === "light" ? "light" : "dark";
   const rootClass = "bt-root" + (theme === "light" ? " light" : "");
 
+  useEffect(() => {
+    document.body.style.background = theme === "light" ? "#F4F5F7" : "#14161A";
+  }, [theme]);
+
   if (!ready || !state || !calc) {
     return (
       <div className={rootClass + " bt-center"}>
@@ -687,7 +699,7 @@ function Overview({ calc, onOpenGroup, onEditIncome }) {
       {calc.alerts.length > 0 && (
         <button type="button" className="bt-alertbar" onClick={() => onOpenGroup(null)}>
           {calc.alerts.length} {calc.alerts.length === 1 ? "category" : "categories"} near or over budget
-          <span className="bt-mono">{calc.alerts.map((c) => c.name.split(" ")[0]).slice(0, 3).join(", ")}{calc.alerts.length > 3 ? "…" : ""}</span>
+          <span className="bt-mono">{calc.alerts.map((c) => c.name).slice(0, 4).join(", ")}{calc.alerts.length > 4 ? "…" : ""}</span>
         </button>
       )}
 
@@ -741,20 +753,21 @@ function Ratio503020({ calc }) {
   const { ideal, groups, incomeActual } = calc;
   if (incomeActual <= 0) return null;
   const rows = [
-    { label: "Needs", got: groups[0].planned, want: ideal.needs },
-    { label: "Wants", got: groups[1].planned, want: ideal.wants },
-    { label: "Savings & Debt", got: groups[2].planned, want: ideal.savings },
+    { label: "Needs", got: groups[0].planned, want: ideal.needs, lowerIsBetter: true },
+    { label: "Wants", got: groups[1].planned, want: ideal.wants, lowerIsBetter: true },
+    { label: "Savings & Debt", got: groups[2].planned, want: ideal.savings, lowerIsBetter: false },
   ];
   return (
     <section className="bt-card">
       <div className="bt-card-h">50 / 30 / 20 check<span className="bt-muted bt-mono"> on {fmt(incomeActual)}</span></div>
       {rows.map((r) => {
-        const diff = r.want - r.got; // +ve = room under the guideline
+        const diff = r.got - r.want; // +ve = spent/saved more than the ideal
+        const good = r.lowerIsBetter ? diff <= 0 : diff >= 0;
         return (
           <div key={r.label} className="bt-ratio-row bt-mono">
             <span>{r.label}</span>
             <span className="bt-muted">{fmt(r.got)} / {fmt(r.want)}</span>
-            <span className={diff >= 0 ? "is-under" : "is-over"}>{fmtSigned(diff)}</span>
+            <span className={good ? "is-under" : "is-over"}>{fmtSigned(diff)}</span>
           </div>
         );
       })}
@@ -831,6 +844,7 @@ function Plan({ state, calc, update, groupView, setGroupView }) {
                     <div className="bt-edit-row">
                       <span className="bt-mono bt-muted">plan €</span>
                       <input className="bt-input bt-input-num bt-mono" type="number" inputMode="decimal" defaultValue={c.planned}
+                        onFocus={(e) => e.target.select()}
                         onBlur={(e) => setCat(c.id, { planned: parseFloat(e.target.value) || 0 })} />
                       <button type="button" className="bt-del" onClick={() => delCat(c.id)}><Trash2 size={16} /></button>
                       <button type="button" className="bt-done" onClick={() => setEditing(null)}>Done</button>
@@ -1030,7 +1044,7 @@ function AddEntry({ state, update, onClose }) {
       <div className="bt-amount-in">
         <span>€</span>
         <input className="bt-input bt-amount bt-mono" type="number" inputMode="decimal" autoFocus
-          placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          placeholder="0.00" value={amount} onFocus={(e) => e.target.select()} onChange={(e) => setAmount(e.target.value)} />
       </div>
 
       {mode === "expense" ? (
@@ -1077,6 +1091,18 @@ function AddEntry({ state, update, onClose }) {
 }
 
 /* ----------------------------- INCOME SHEET ----------------------------- */
+function IncomeRow({ label, val, set, hint }) {
+  return (
+    <div className="bt-inc-row">
+      <div><div className="bt-inc-l">{label}</div>{hint && <div className="bt-muted bt-tiny">{hint}</div>}</div>
+      <div className="bt-amount-in sm"><span>€</span>
+        <input className="bt-input bt-mono" type="number" inputMode="decimal" value={val}
+          onFocus={(e) => e.target.select()} onChange={(e) => set(e.target.value)} />
+      </div>
+    </div>
+  );
+}
+
 function IncomeSheet({ state, calc, update, onClose }) {
   const m = state.months[state.current];
   const [salary, setSalary] = useState(m.income.salary);
@@ -1094,23 +1120,14 @@ function IncomeSheet({ state, calc, update, onClose }) {
     onClose();
   };
 
-  const Row = ({ label, val, set, hint }) => (
-    <div className="bt-inc-row">
-      <div><div className="bt-inc-l">{label}</div>{hint && <div className="bt-muted bt-tiny">{hint}</div>}</div>
-      <div className="bt-amount-in sm"><span>€</span>
-        <input className="bt-input bt-mono" type="number" inputMode="decimal" value={val} onChange={(e) => set(e.target.value)} />
-      </div>
-    </div>
-  );
-
   const effectivePrior = calc.isEarliest ? (+prior || 0) : calc.prior;
 
   return (
     <Sheet title={`Income · ${monthMeta(state.current).label}`} onClose={onClose}>
-      <Row label="After-tax salary" val={salary} set={setSalary} hint={`plan ${fmt(state.plan.income.salary)}`} />
-      <Row label="Other income" val={other} set={setOther} />
+      <IncomeRow label="After-tax salary" val={salary} set={setSalary} hint={`plan ${fmt(state.plan.income.salary)}`} />
+      <IncomeRow label="Other income" val={other} set={setOther} />
       {calc.isEarliest ? (
-        <Row label="Starting balance" val={prior} set={setPrior} hint="money on hand before this month" />
+        <IncomeRow label="Starting balance" val={prior} set={setPrior} hint="money on hand before this month" />
       ) : (
         <div className="bt-inc-row">
           <div><div className="bt-inc-l">Prior month-end balance</div><div className="bt-muted bt-tiny">carried live from the previous month</div></div>
@@ -1157,6 +1174,31 @@ function Insights({ state, calc, update, theme }) {
       ...s,
       months: { ...s.months, [s.current]: { ...m, balances: { ...m.balances, [accId]: parseFloat(v) || 0 } } },
     }));
+  const toggleBreakdown = (accId) =>
+    update((s) => ({ ...s, accounts: s.accounts.map((a) => (a.id === accId ? { ...a, breakdown: !a.breakdown } : a)) }));
+  const itemsFor = (accId) => m.balanceItems?.[accId] || [];
+  const recomputeFromItems = (mm, accId, items) => {
+    const total = items.reduce((t, it) => t + (parseFloat(it.amount) || 0), 0);
+    return { ...mm, balanceItems: { ...mm.balanceItems, [accId]: items }, balances: { ...mm.balances, [accId]: total } };
+  };
+  const addBalanceItem = (accId) =>
+    update((s) => {
+      const mm = s.months[s.current];
+      const items = [...(mm.balanceItems?.[accId] || []), { id: uid(), label: "", amount: 0 }];
+      return { ...s, months: { ...s.months, [s.current]: recomputeFromItems(mm, accId, items) } };
+    });
+  const removeBalanceItem = (accId, itemId) =>
+    update((s) => {
+      const mm = s.months[s.current];
+      const items = (mm.balanceItems?.[accId] || []).filter((it) => it.id !== itemId);
+      return { ...s, months: { ...s.months, [s.current]: recomputeFromItems(mm, accId, items) } };
+    });
+  const setBalanceItem = (accId, itemId, field, value) =>
+    update((s) => {
+      const mm = s.months[s.current];
+      const items = (mm.balanceItems?.[accId] || []).map((it) => (it.id === itemId ? { ...it, [field]: value } : it));
+      return { ...s, months: { ...s.months, [s.current]: recomputeFromItems(mm, accId, items) } };
+    });
   const toggleKind = (accId) =>
     update((s) => ({
       ...s,
@@ -1199,22 +1241,53 @@ function Insights({ state, calc, update, theme }) {
   const anyCashBal = liquidAccts.some((a) => m.balances[a.id] != null);
   const addHeld = () =>
     update((s) => ({ ...s, accounts: [...s.accounts, { id: uid(), name: "New holding", kind: "asset", liquid: false }] }));
-  const accRow = (a) => (
-    <div key={a.id} className="bt-acc">
-      <button type="button" className={"bt-kind " + a.kind} onClick={() => toggleKind(a.id)} title="Asset / owed">
-        {a.kind === "asset" ? "＋" : "−"}
-      </button>
-      <input className="bt-acc-name" defaultValue={a.name} onBlur={(e) => renameAcc(a.id, e.target.value)} />
-      <button type="button" className={"bt-liq" + (a.liquid ? " on" : "")} onClick={() => toggleLiquid(a.id)} title="Move between cash and held">
-        {a.liquid ? "cash" : "held"}
-      </button>
-      <div className="bt-amount-in xs"><span>€</span>
-        <input className="bt-input bt-mono" type="number" inputMode="decimal" value={m.balances[a.id] ?? ""}
-          placeholder="0" onChange={(e) => setBalance(a.id, e.target.value)} />
+  const accRow = (a) => {
+    const items = itemsFor(a.id);
+    return (
+      <div key={a.id} className="bt-acc-wrap">
+        <div className="bt-acc">
+          <button type="button" className={"bt-kind " + a.kind} onClick={() => toggleKind(a.id)} title="Asset / owed">
+            {a.kind === "asset" ? "＋" : "−"}
+          </button>
+          <input className="bt-acc-name" defaultValue={a.name} onBlur={(e) => renameAcc(a.id, e.target.value)} />
+          <button type="button" className={"bt-liq" + (a.liquid ? " on" : "")} onClick={() => toggleLiquid(a.id)} title="Move between cash and held">
+            {a.liquid ? "cash" : "held"}
+          </button>
+          <button type="button" className={"bt-split" + (a.breakdown ? " on" : "")} onClick={() => toggleBreakdown(a.id)} title="Split into multiple amounts (e.g. owed by different people)">
+            <Layers size={13} />
+          </button>
+          <div className="bt-amount-in xs">
+            <span>€</span>
+            {a.breakdown ? (
+              <input className="bt-input bt-mono is-computed" type="number" value={m.balances[a.id] ?? 0} readOnly tabIndex={-1} title="Total of the amounts below" />
+            ) : (
+              <input className="bt-input bt-mono" type="number" inputMode="decimal" value={m.balances[a.id] ?? ""}
+                placeholder="0" onFocus={(e) => e.target.select()} onChange={(e) => setBalance(a.id, e.target.value)} />
+            )}
+          </div>
+          <button type="button" className="bt-del" onClick={() => delAcc(a.id)} aria-label="Remove account"><Trash2 size={14} /></button>
+        </div>
+        {a.breakdown && (
+          <div className="bt-breakdown">
+            {items.map((it) => (
+              <div key={it.id} className="bt-breakdown-row">
+                <input className="bt-input bt-breakdown-label" placeholder="e.g. Sarah" defaultValue={it.label}
+                  onBlur={(e) => setBalanceItem(a.id, it.id, "label", e.target.value)} />
+                <div className="bt-amount-in xs">
+                  <span>€</span>
+                  <input className="bt-input bt-mono" type="number" inputMode="decimal" value={it.amount ?? ""}
+                    placeholder="0" onFocus={(e) => e.target.select()}
+                    onChange={(e) => setBalanceItem(a.id, it.id, "amount", e.target.value)} />
+                </div>
+                <button type="button" className="bt-del sm" onClick={() => removeBalanceItem(a.id, it.id)} aria-label="Remove amount"><Trash2 size={12} /></button>
+              </div>
+            ))}
+            <button type="button" className="bt-add-cat sm" onClick={() => addBalanceItem(a.id)}><Plus size={12} /> Add amount</button>
+          </div>
+        )}
       </div>
-      <button type="button" className="bt-del" onClick={() => delAcc(a.id)} aria-label="Remove account"><Trash2 size={14} /></button>
-    </div>
-  );
+    );
+  };
 
   const series = buildSeries(state);
   const snaps = (state.wealthSnapshots || []).slice().sort((a, b) => a.date.localeCompare(b.date))
@@ -1251,179 +1324,191 @@ function Insights({ state, calc, update, theme }) {
 
   return (
     <div className="bt-stack">
-      <button type="button" className="bt-reportbtn" onClick={() => setShowReport(true)}>
-        <span><FileText size={16} /> Create report (PDF)</span>
-        <ChevronRight size={16} />
-      </button>
+      <div className="bt-insrow">
+        <button type="button" className="bt-reportbtn" onClick={() => setShowReport(true)}>
+          <span><FileText size={16} /> Create report (PDF)</span>
+          <ChevronRight size={16} />
+        </button>
+      </div>
       {showReport && <ReportSheet state={state} onClose={() => setShowReport(false)} />}
 
-      {/* CASH — reconciliation vs the budget */}
-      <section className="bt-card">
-        <div className="bt-card-h">Cash<span className="bt-muted bt-mono"> · {monthMeta(state.current).label}</span></div>
-        <div className="bt-muted bt-tiny" style={{ marginBottom: 10 }}>
-          Spendable balances, reconciled against what the budget says is left this month. Assets add, owed subtracts.
-        </div>
-        {liquidAccts.map(accRow)}
-        <button type="button" className="bt-add-cat" onClick={addAcc}><Plus size={14} /> Add cash account</button>
-        <div className="bt-recon bt-mono">
-          <div><span className="bt-muted">Net cash</span><strong>{fmt(netCash)}</strong></div>
-          <div><span className="bt-muted">Budget says</span><strong>{fmt(expected)}</strong></div>
-          <div className={reconciled ? "is-under" : "is-over"}><span className="bt-muted">Difference</span><strong>{fmtSigned(diff)}</strong></div>
-        </div>
-        <div className={"bt-recon-flag " + (!anyCashBal ? "warn" : reconciled ? "ok" : "warn")}>
-          {!anyCashBal ? "Enter your cash balances to reconcile against the budget." : reconciled ? "Reconciled — cash matches the budget." : "Off by " + fmt(Math.abs(diff)) + " — a logged amount or balance is out."}
-        </div>
-      </section>
+      <div className="bt-insrow">
+        {/* CASH — reconciliation vs the budget */}
+        <section className="bt-card">
+          <div className="bt-card-h">Cash<span className="bt-muted bt-mono"> · {monthMeta(state.current).label}</span></div>
+          <div className="bt-muted bt-tiny" style={{ marginBottom: 10 }}>
+            Spendable balances, reconciled against what the budget says is left this month. Assets add, owed subtracts.
+          </div>
+          {liquidAccts.map(accRow)}
+          <button type="button" className="bt-add-cat" onClick={addAcc}><Plus size={14} /> Add cash account</button>
+          <div className="bt-recon bt-mono">
+            <div><span className="bt-muted">Net cash</span><strong>{fmt(netCash)}</strong></div>
+            <div><span className="bt-muted">Budget says</span><strong>{fmt(expected)}</strong></div>
+            <div className={reconciled ? "is-under" : "is-over"}><span className="bt-muted">Difference</span><strong>{fmtSigned(diff)}</strong></div>
+          </div>
+          <div className={"bt-recon-flag " + (!anyCashBal ? "warn" : reconciled ? "ok" : "warn")}>
+            {!anyCashBal ? "Enter your cash balances to reconcile against the budget." : reconciled ? "Reconciled — cash matches the budget." : "Off by " + fmt(Math.abs(diff)) + " — a logged amount or balance is out."}
+          </div>
+        </section>
 
-      {/* WEALTH — high-level held assets summary */}
-      <section className="bt-card">
-        <div className="bt-card-h">Wealth<span className="bt-muted bt-mono"> · {monthMeta(state.current).label}</span></div>
-        <div className="bt-muted bt-tiny" style={{ marginBottom: 10 }}>
-          Savings and investments — your longer-term wealth. Update the balances each month to track growth.
-        </div>
-        {heldAccts.map(accRow)}
-        <button type="button" className="bt-add-cat" onClick={addHeld}><Plus size={14} /> Add holding</button>
-        <div className="bt-recon bt-mono">
-          <div><span className="bt-muted">Held assets</span><strong>{fmt(heldTotal)}</strong></div>
-          <div><span className="bt-muted">Net worth</span><strong className={netWorth < 0 ? "is-over" : ""}>{fmt(netWorth)}</strong></div>
-        </div>
-        <div className="bt-muted bt-tiny" style={{ marginTop: 8 }}>Net worth combines cash, held assets and anything owed.</div>
-        {snapStale && (
-          <div className="bt-recon-flag warn" style={{ marginTop: 10 }}>
-            {lastSnap ? `Last snapshot was ${new Date(lastSnap.date).toLocaleDateString("en-IE", { day: "2-digit", month: "short" })} — update your balances and save a fresh one.` : "Save your first snapshot to start tracking wealth over time."}
+        {/* WEALTH — high-level held assets summary */}
+        <section className="bt-card">
+          <div className="bt-card-h">Wealth<span className="bt-muted bt-mono"> · {monthMeta(state.current).label}</span></div>
+          <div className="bt-muted bt-tiny" style={{ marginBottom: 10 }}>
+            Savings and investments — your longer-term wealth. Update the balances each month to track growth.
           </div>
-        )}
-        <div className="bt-snap-save">
-          <div className="bt-amount-in sm" style={{ width: "auto", flex: 1 }}>
-            <input className="bt-input bt-mono" type="date" value={snapDate} onChange={(e) => setSnapDate(e.target.value)} />
+          {heldAccts.map(accRow)}
+          <button type="button" className="bt-add-cat" onClick={addHeld}><Plus size={14} /> Add holding</button>
+          <div className="bt-recon bt-mono">
+            <div><span className="bt-muted">Held assets</span><strong>{fmt(heldTotal)}</strong></div>
+            <div><span className="bt-muted">Net worth</span><strong className={netWorth < 0 ? "is-over" : ""}>{fmt(netWorth)}</strong></div>
           </div>
-          <button type="button" className="bt-savebtn" onClick={saveSnapshot}>Save snapshot</button>
-        </div>
-        <div className="bt-muted bt-tiny" style={{ marginTop: 6 }}>Records {fmt(heldTotal)} held assets as a dated point on the trend below.</div>
-      </section>
+          <div className="bt-muted bt-tiny" style={{ marginTop: 8 }}>Net worth combines cash, held assets and anything owed.</div>
+          {snapStale && (
+            <div className="bt-recon-flag warn" style={{ marginTop: 10 }}>
+              {lastSnap ? `Last snapshot was ${new Date(lastSnap.date).toLocaleDateString("en-IE", { day: "2-digit", month: "short" })} — update your balances and save a fresh one.` : "Save your first snapshot to start tracking wealth over time."}
+            </div>
+          )}
+          <div className="bt-snap-save">
+            <div className="bt-amount-in sm" style={{ width: "auto", flex: 1 }}>
+              <input className="bt-input bt-mono" type="date" value={snapDate} onChange={(e) => setSnapDate(e.target.value)} />
+            </div>
+            <button type="button" className="bt-savebtn" onClick={saveSnapshot}>Save snapshot</button>
+          </div>
+          <div className="bt-muted bt-tiny" style={{ marginTop: 6 }}>Records {fmt(heldTotal)} held assets as a dated point on the trend below.</div>
+        </section>
+      </div>
 
-      {/* HELD ASSETS OVER TIME */}
-      <section className="bt-card">
-        <div className="bt-card-h">Held assets over time</div>
-        {snaps.length < 2 ? (
-          <div className="bt-muted bt-tiny">
-            {snaps.length === 0
-              ? "Save a snapshot above to start tracking your wealth over time."
-              : "1 snapshot saved — save another on a later date to see the trend."}
-          </div>
-        ) : (
+      <div className="bt-insrow">
+        {/* HELD ASSETS OVER TIME */}
+        <section className="bt-card">
+          <div className="bt-card-h">Held assets over time</div>
+          {snaps.length < 2 ? (
+            <div className="bt-muted bt-tiny">
+              {snaps.length === 0
+                ? "Save a snapshot above to start tracking your wealth over time."
+                : "1 snapshot saved — save another on a later date to see the trend."}
+            </div>
+          ) : (
+            <div className="bt-chart">
+              <ResponsiveContainer width="100%" height={200}>
+                <LineChart data={snaps}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={cGrid} vertical={false} />
+                  <XAxis dataKey="label" {...axis} axisLine={{ stroke: cAxisLine }} tickLine={false} />
+                  <YAxis {...axis} axisLine={false} tickLine={false} width={46} tickFormatter={(v) => "€" + (v / 1000).toFixed(0) + "k"} />
+                  <Tooltip {...tip} cursor={{ stroke: cAxisLine }} labelFormatter={(l) => l} />
+                  <Line type="monotone" dataKey="total" name="Held assets" stroke="#7FB3A6" strokeWidth={2} dot={{ r: 3 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+          {snaps.length > 0 && (
+            <div className="bt-snaplist">
+              {snaps.slice().reverse().map((sn) => (
+                <div key={sn.id} className="bt-snaprow bt-mono">
+                  <span className="bt-muted">{new Date(sn.date).toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" })}</span>
+                  <strong>{fmt(sn.total)}</strong>
+                  <button type="button" className="bt-del" onClick={() => delSnapshot(sn.id)} aria-label="Delete snapshot"><Trash2 size={13} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
+
+      <div className="bt-insrow">
+        {/* INCOME VS EXPENSES */}
+        <section className="bt-card">
+          <div className="bt-card-h">Income vs expenses</div>
           <div className="bt-chart">
             <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={snaps}>
-                <CartesianGrid strokeDasharray="3 3" stroke={cGrid} vertical={false} />
-                <XAxis dataKey="label" {...axis} axisLine={{ stroke: cAxisLine }} tickLine={false} />
-                <YAxis {...axis} axisLine={false} tickLine={false} width={46} tickFormatter={(v) => "€" + (v / 1000).toFixed(0) + "k"} />
-                <Tooltip {...tip} cursor={{ stroke: cAxisLine }} labelFormatter={(l) => l} />
-                <Line type="monotone" dataKey="total" name="Held assets" stroke="#7FB3A6" strokeWidth={2} dot={{ r: 3 }} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-        {snaps.length > 0 && (
-          <div className="bt-snaplist">
-            {snaps.slice().reverse().map((sn) => (
-              <div key={sn.id} className="bt-snaprow bt-mono">
-                <span className="bt-muted">{new Date(sn.date).toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" })}</span>
-                <strong>{fmt(sn.total)}</strong>
-                <button type="button" className="bt-del" onClick={() => delSnapshot(sn.id)} aria-label="Delete snapshot"><Trash2 size={13} /></button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* BUDGET SUGGESTIONS */}
-      <section className="bt-card">
-        <div className="bt-card-h">Budget suggestions</div>
-        {suggestions.length === 0 ? (
-          <div className="bt-muted bt-tiny">No changes suggested yet. Once a variable category has 2+ months of logged spend that's consistently off its plan, a tweak will appear here with a one-tap apply.</div>
-        ) : suggestions.map(({ c, n, avg, suggested, dev }) => (
-          <div key={c.id} className="bt-sugg">
-            <div className="bt-sugg-mid">
-              <div className="bt-sugg-name">{c.name}</div>
-              <div className="bt-muted bt-tiny bt-mono">avg {fmt(avg)} / {n} mo · now {fmt(c.planned)}</div>
-            </div>
-            <button type="button" className="bt-sugg-apply" onClick={() => setPlanned(c.id, suggested)}>
-              <span className={dev > 0 ? "is-over" : "is-under"}>{dev > 0 ? "▲ raise to" : "▼ lower to"} {fmt(suggested)}</span>
-            </button>
-          </div>
-        ))}
-      </section>
-
-      {/* INCOME VS EXPENSES */}
-      <section className="bt-card">
-        <div className="bt-card-h">Income vs expenses</div>
-        <div className="bt-chart">
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={series} barGap={4}>
-              <CartesianGrid strokeDasharray="3 3" stroke={cGrid} vertical={false} />
-              <XAxis dataKey="label" {...axis} axisLine={{ stroke: cAxisLine }} tickLine={false} />
-              <YAxis {...axis} axisLine={false} tickLine={false} width={38} tickFormatter={(v) => "€" + v} />
-              <Tooltip {...tip} cursor={{ fill: "rgba(255,255,255,.04)" }} />
-              <Legend wrapperStyle={{ fontSize: 11, color: "#8A909C" }} />
-              <Bar dataKey="income" name="Income" fill="#5DA9E9" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="expenses" name="Expenses" fill="#C9A24A" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </section>
-
-      {/* PLANNED VS ACTUAL */}
-      <section className="bt-card">
-        <div className="bt-card-h">Planned vs actual <span className="bt-muted bt-mono"> · {monthMeta(state.current).label}</span></div>
-        <div className="bt-chart">
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={groupData} barGap={4}>
-              <CartesianGrid strokeDasharray="3 3" stroke={cGrid} vertical={false} />
-              <XAxis dataKey="name" {...axis} axisLine={{ stroke: cAxisLine }} tickLine={false} />
-              <YAxis {...axis} axisLine={false} tickLine={false} width={38} tickFormatter={(v) => "€" + v} />
-              <Tooltip {...tip} cursor={{ fill: "rgba(255,255,255,.04)" }} />
-              <Legend wrapperStyle={{ fontSize: 11, color: "#8A909C" }} />
-              <Bar dataKey="Planned" fill="#404756" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="Actual" fill="#6E8AC4" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </section>
-
-      {/* LEFT AT MONTH-END */}
-      {series.length > 1 && (
-        <section className="bt-card">
-          <div className="bt-card-h">Left at month-end</div>
-          <div className="bt-chart">
-            <ResponsiveContainer width="100%" height={180}>
-              <LineChart data={series}>
+              <BarChart data={series} barGap={4}>
                 <CartesianGrid strokeDasharray="3 3" stroke={cGrid} vertical={false} />
                 <XAxis dataKey="label" {...axis} axisLine={{ stroke: cAxisLine }} tickLine={false} />
                 <YAxis {...axis} axisLine={false} tickLine={false} width={38} tickFormatter={(v) => "€" + v} />
-                <Tooltip {...tip} cursor={{ stroke: cAxisLine }} />
-                <Line type="monotone" dataKey="endBalance" name="Left" stroke="#4FB477" strokeWidth={2} dot={{ r: 3 }} />
-              </LineChart>
+                <Tooltip {...tip} cursor={{ fill: "rgba(255,255,255,.04)" }} />
+                <Legend wrapperStyle={{ fontSize: 11, color: "#8A909C" }} />
+                <Bar dataKey="income" name="Income" fill="#5DA9E9" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="expenses" name="Expenses" fill="#C9A24A" radius={[4, 4, 0, 0]} />
+              </BarChart>
             </ResponsiveContainer>
           </div>
         </section>
+
+        {/* PLANNED VS ACTUAL */}
+        <section className="bt-card">
+          <div className="bt-card-h">Planned vs actual <span className="bt-muted bt-mono"> · {monthMeta(state.current).label}</span></div>
+          <div className="bt-chart">
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={groupData} barGap={4}>
+                <CartesianGrid strokeDasharray="3 3" stroke={cGrid} vertical={false} />
+                <XAxis dataKey="name" {...axis} axisLine={{ stroke: cAxisLine }} tickLine={false} />
+                <YAxis {...axis} axisLine={false} tickLine={false} width={38} tickFormatter={(v) => "€" + v} />
+                <Tooltip {...tip} cursor={{ fill: "rgba(255,255,255,.04)" }} />
+                <Legend wrapperStyle={{ fontSize: 11, color: "#8A909C" }} />
+                <Bar dataKey="Planned" fill="#404756" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="Actual" fill="#6E8AC4" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </section>
+      </div>
+
+      {/* LEFT AT MONTH-END */}
+      {series.length > 1 && (
+        <div className="bt-insrow">
+          <section className="bt-card">
+            <div className="bt-card-h">Left at month-end</div>
+            <div className="bt-chart">
+              <ResponsiveContainer width="100%" height={180}>
+                <LineChart data={series}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={cGrid} vertical={false} />
+                  <XAxis dataKey="label" {...axis} axisLine={{ stroke: cAxisLine }} tickLine={false} />
+                  <YAxis {...axis} axisLine={false} tickLine={false} width={38} tickFormatter={(v) => "€" + v} />
+                  <Tooltip {...tip} cursor={{ stroke: cAxisLine }} />
+                  <Line type="monotone" dataKey="endBalance" name="Left" stroke="#4FB477" strokeWidth={2} dot={{ r: 3 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+        </div>
       )}
 
-      {/* LONGER TERM */}
-      <section className="bt-card">
-        <div className="bt-card-h">Longer term</div>
-        <div className="bt-lt">
-          {[{ t: "Last " + qr.months + " mo", r: qr }, { t: "Last " + yr.months + " mo", r: yr }].map(({ t, r }) => (
-            <div key={t} className="bt-lt-col">
-              <div className="bt-lt-h">{t}</div>
-              <div className="bt-lt-row bt-mono"><span className="bt-muted">In</span><span>{fmt(r.income)}</span></div>
-              <div className="bt-lt-row bt-mono"><span className="bt-muted">Out</span><span>{fmt(r.expenses)}</span></div>
-              <div className="bt-lt-row bt-mono"><span className="bt-muted">Saved</span><span className={r.saved >= 0 ? "is-under" : "is-over"}>{fmt(r.saved)}</span></div>
-              <div className="bt-lt-row bt-mono"><span className="bt-muted">Rate</span><span>{r.rate.toFixed(0)}%</span></div>
+      <div className="bt-insrow">
+        {/* BUDGET SUGGESTIONS */}
+        <section className="bt-card">
+          <div className="bt-card-h">Budget suggestions</div>
+          {suggestions.length === 0 ? (
+            <div className="bt-muted bt-tiny">No changes suggested yet. Once a variable category has 2+ months of logged spend that's consistently off its plan, a tweak will appear here with a one-tap apply.</div>
+          ) : suggestions.map(({ c, n, avg, suggested, dev }) => (
+            <div key={c.id} className="bt-sugg">
+              <div className="bt-sugg-mid">
+                <div className="bt-sugg-name">{c.name}</div>
+                <div className="bt-muted bt-tiny bt-mono">avg {fmt(avg)} / {n} mo · now {fmt(c.planned)}</div>
+              </div>
+              <button type="button" className="bt-sugg-apply" onClick={() => setPlanned(c.id, suggested)}>
+                <span className={dev > 0 ? "is-over" : "is-under"}>{dev > 0 ? "▲ raise to" : "▼ lower to"} {fmt(suggested)}</span>
+              </button>
             </div>
           ))}
-        </div>
-      </section>
+        </section>
+
+        {/* LONGER TERM */}
+        <section className="bt-card">
+          <div className="bt-card-h">Longer term</div>
+          <div className="bt-lt">
+            {[{ t: "Last " + qr.months + " mo", r: qr }, { t: "Last " + yr.months + " mo", r: yr }].map(({ t, r }) => (
+              <div key={t} className="bt-lt-col">
+                <div className="bt-lt-h">{t}</div>
+                <div className="bt-lt-row bt-mono"><span className="bt-muted">In</span><span>{fmt(r.income)}</span></div>
+                <div className="bt-lt-row bt-mono"><span className="bt-muted">Out</span><span>{fmt(r.expenses)}</span></div>
+                <div className="bt-lt-row bt-mono"><span className="bt-muted">Saved</span><span className={r.saved >= 0 ? "is-under" : "is-over"}>{fmt(r.saved)}</span></div>
+                <div className="bt-lt-row bt-mono"><span className="bt-muted">Rate</span><span>{r.rate.toFixed(0)}%</span></div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
@@ -1654,12 +1739,16 @@ function ReportSheet({ state, onClose }) {
             </div>
           )}
 
-          {sec.ratio && d.base > 0 && (
+          {sec.ratio && d.income > 0 && (
             <div className="bt-rep-sec">
-              <div className="bt-rep-sec-h">50 / 30 / 20 vs plan <span>on {fmt(d.base)}</span></div>
-              {[["Needs", d.groups[0].planned, d.ideal.needs], ["Wants", d.groups[1].planned, d.ideal.wants], ["Savings & Debt", d.groups[2].planned, d.ideal.savings]].map(([l, got, want]) => (
-                <div key={l} className="bt-rep-line"><span>{l}</span><span>{fmt(got)} <i>/ {fmt(want)}</i></span><span style={{ color: want - got >= 0 ? "#3E9D63" : "#D1503F" }}>{want - got >= 0 ? "+" : "−"}{fmt(Math.abs(want - got))}</span></div>
-              ))}
+              <div className="bt-rep-sec-h">50 / 30 / 20 vs actual <span>on {fmt(d.income)}</span></div>
+              {[["Needs", d.groups[0].planned, d.ideal.needs, true], ["Wants", d.groups[1].planned, d.ideal.wants, true], ["Savings & Debt", d.groups[2].planned, d.ideal.savings, false]].map(([l, got, want, lowerIsBetter]) => {
+                const diff = got - want;
+                const good = lowerIsBetter ? diff <= 0 : diff >= 0;
+                return (
+                  <div key={l} className="bt-rep-line"><span>{l}</span><span>{fmt(got)} <i>/ {fmt(want)}</i></span><span style={{ color: good ? "#3E9D63" : "#D1503F" }}>{diff >= 0 ? "+" : "−"}{fmt(Math.abs(diff))}</span></div>
+                );
+              })}
             </div>
           )}
 
@@ -1749,6 +1838,7 @@ function Style() {
       .bt-iconbtn:disabled{opacity:.35;}
 
       .bt-main{padding:16px;} .bt-stack{display:flex;flex-direction:column;gap:12px;}
+      .bt-insrow{display:flex;flex-direction:column;gap:12px;}
 
       .bt-hero{background:var(--hero);border:1px solid var(--line);
         border-radius:18px;padding:22px 20px;}
@@ -1803,7 +1893,7 @@ function Style() {
       .bt-alertbar{display:flex;flex-direction:column;gap:3px;align-items:flex-start;width:100%;text-align:left;
         background:rgba(201,162,74,.1);border:1px solid rgba(201,162,74,.4);color:var(--accent);
         border-radius:13px;padding:12px 15px;font-size:13px;font-weight:600;}
-      .bt-alertbar span{font-size:11px;font-weight:400;opacity:.8;}
+      .bt-alertbar span{font-size:11px;font-weight:400;opacity:.8;white-space:normal;word-break:break-word;line-height:1.5;}
       .bt-fixed-toggle{background:var(--surface2);border:1px solid var(--line);color:var(--muted);
         border-radius:9px;padding:9px;font:inherit;font-size:12px;width:100%;text-align:center;}
       .bt-fixed-toggle.on{color:var(--accent);border-color:rgba(201,162,74,.4);}
@@ -1883,14 +1973,24 @@ function Style() {
       .bt-inc-l{font-size:14px;font-weight:500;}
       .bt-inc-total{display:flex;justify-content:space-between;align-items:center;padding:16px 0 4px;font-size:16px;}
       .bt-inc-total strong{font-size:18px;}
-      .bt-acc{display:flex;align-items:center;gap:8px;padding:7px 0;border-top:1px solid var(--line);}
-      .bt-acc:first-of-type{border-top:none;}
+      .bt-acc-wrap{border-top:1px solid var(--line);padding:0;}
+      .bt-acc-wrap:first-of-type{border-top:none;}
+      .bt-acc{display:flex;align-items:center;gap:8px;padding:7px 0;}
       .bt-kind{width:30px;height:30px;border-radius:9px;border:1px solid var(--line);background:var(--surface2);
         font-size:16px;font-weight:600;line-height:1;flex:0 0 auto;}
       .bt-kind.asset{color:var(--under);border-color:rgba(79,180,119,.4);}
       .bt-kind.owed{color:var(--over);border-color:rgba(224,105,92,.4);}
       .bt-acc-name{flex:1;min-width:0;background:none;border:none;color:var(--text);font:inherit;font-size:13.5px;padding:4px 2px;border-bottom:1px solid transparent;}
       .bt-acc-name:focus{outline:none;border-bottom-color:var(--accent);}
+      .bt-split{width:28px;height:28px;border-radius:8px;border:1px solid var(--line);background:var(--surface2);color:var(--muted);flex:0 0 auto;display:flex;align-items:center;justify-content:center;}
+      .bt-split.on{color:var(--accent);border-color:rgba(201,162,74,.4);background:rgba(201,162,74,.1);}
+      .bt-input.is-computed{color:var(--muted);}
+      .bt-breakdown{padding:2px 0 10px 38px;display:flex;flex-direction:column;gap:6px;}
+      .bt-breakdown-row{display:flex;align-items:center;gap:8px;}
+      .bt-breakdown-label{flex:1;min-width:0;background:var(--surface2);border:1px solid var(--line);border-radius:8px;color:var(--text);font:inherit;font-size:13px;padding:6px 9px;}
+      .bt-breakdown-label:focus{outline:none;border-color:var(--accent);}
+      .bt-del.sm{width:24px;height:24px;}
+      .bt-add-cat.sm{padding:7px;font-size:12px;}
       .bt-amount-in.xs{padding:1px 9px;width:120px;flex:0 0 auto;}
       .bt-amount-in.xs span{font-size:14px;}
       .bt-amount-in.xs .bt-input{padding:7px 0;font-size:14px;text-align:right;}
@@ -1986,10 +2086,18 @@ function Style() {
         .bt-main .bt-stack > .bt-payall,
         .bt-main .bt-stack > .bt-back,
         .bt-main .bt-stack > .bt-empty,
+        .bt-main .bt-stack > .bt-txn,
+        .bt-main .bt-stack > .bt-subs,
         .bt-main .bt-stack > .bt-card-h{grid-column:1 / -1;}
         .bt-hero-amount{font-size:40px;}
         .bt-overlay{align-items:center;}
         .bt-sheet{max-width:460px;border-radius:18px;animation:none;}
+        .bt-main .bt-stack > .bt-txn,
+        .bt-main .bt-stack > .bt-subs,
+        .bt-main .bt-stack > .bt-actfilter{max-width:640px;}
+        .bt-txn{padding:10px 14px;}
+        .bt-main .bt-stack > .bt-insrow{grid-column:1 / -1;display:flex;flex-direction:row;gap:14px;align-items:start;}
+        .bt-insrow > *{flex:1 1 0;min-width:0;}
       }
       @media (prefers-reduced-motion:reduce){.bt-sheet{animation:none;}.bt-track-fill{transition:none;}}
     `}</style>
