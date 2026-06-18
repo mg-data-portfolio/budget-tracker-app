@@ -1412,9 +1412,10 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
   // longer-term rollups
   const sumRange = (arr) => arr.reduce((o, x) => ({ income: o.income + x.income, expenses: o.expenses + x.expenses }), { income: 0, expenses: 0 });
   const rollup = (n) => {
-    const r = sumRange(series.slice(-n));
+    const window = completeSeries.slice(-n);
+    const r = sumRange(window);
     const saved = r.income - r.expenses;
-    return { ...r, saved, rate: r.income > 0 ? (saved / r.income) * 100 : 0, months: Math.min(n, series.length) };
+    return { ...r, saved, rate: r.income > 0 ? (saved / r.income) * 100 : 0, months: window.length };
   };
   const qr = rollup(3);
   const yr = rollup(12);
