@@ -47,6 +47,7 @@ const SEED = {
     { id: "acc-boi-dep", name: "BOI Deposit Account", kind: "asset", liquid: false },
     { id: "acc-irishlife", name: "Irish Life Savings", kind: "asset", liquid: false },
     { id: "acc-n26", name: "N26 Investment", kind: "asset", liquid: false },
+    { id: "acc-car-loan", name: "Car Loan", kind: "loan", liquid: false, loanMeta: { originalAmount: 23250, interestRate: 6.31, term: 60, disbursalDate: "2024-11-08", repaymentDay: 1, linkedCategories: ["Car Loan Repayment", "Car Loan Savings"] } },
   ],
   categories: [
     { id: uid(), group: "needs", name: "Rent", planned: 200, fixed: true },
@@ -77,7 +78,7 @@ const SEED = {
       income: { salary: 0, other: 0, prior: 0 }, txns: [], incomeTxns: [],
       balances: {
         "acc-holiday": 1105.12, "acc-emergency": 280.81, "acc-boi-sav": 2000.58,
-        "acc-boi-dep": 3626.15, "acc-irishlife": 7981.60, "acc-n26": 970.70,
+        "acc-boi-dep": 3626.15, "acc-irishlife": 7981.60, "acc-n26": 970.70, "acc-car-loan": 16707.70,
       },
     },
   },
@@ -361,6 +362,15 @@ function migrate(state) {
     s = { ...s, months, migratedBreakdownV7: true };
   }
 
+  if (!s.migratedLoansV8) {
+    const accounts = (s.accounts || []).map(a => ({
+      ...a,
+      excludeFromNetWorth: a.excludeFromNetWorth !== undefined ? a.excludeFromNetWorth : false,
+      loanMeta: a.loanMeta || null, // {originalAmount, interestRate, term, disbursalDate, repaymentDay, linkedCategories}
+    }));
+    s = { ...s, accounts, migratedLoansV8: true };
+  }
+
   return s;
 }
 
@@ -553,6 +563,7 @@ export default function App() {
   const [adding, setAdding] = useState(false);
   const [editIncome, setEditIncome] = useState(false);
   const [editSettings, setEditSettings] = useState(false);
+  const [loansInNetWorth, setLoansInNetWorth] = useState(true); // include loans in net worth calculation
   const theme = state?.theme === "light" ? "light" : "dark";
   const rootClass = "bt-root" + (theme === "light" ? " light" : "");
 
@@ -634,7 +645,7 @@ export default function App() {
           <Plan state={state} calc={calc} update={update} groupView={groupView} setGroupView={setGroupView} />
         )}
         {tab === "insights" && (
-          <Insights state={state} calc={calc} update={update} theme={theme} />
+          <Insights state={state} calc={calc} update={update} theme={theme} loansInNetWorth={loansInNetWorth} setLoansInNetWorth={setLoansInNetWorth} />
         )}
       </main>
 
@@ -1157,7 +1168,7 @@ function IncomeSheet({ state, calc, update, onClose }) {
 }
 
 /* ------------------------------ INSIGHTS ------------------------------ */
-function Insights({ state, calc, update, theme }) {
+function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWorth }) {
   const m = state.months[state.current];
   const [snapDate, setSnapDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [showReport, setShowReport] = useState(false);
@@ -1233,7 +1244,8 @@ function Insights({ state, calc, update, theme }) {
   const bal = (a) => m.balances[a.id] || 0;
   const totalAssets = state.accounts.filter((a) => a.kind === "asset").reduce((s, a) => s + bal(a), 0);
   const totalOwed = state.accounts.filter((a) => a.kind === "owed").reduce((s, a) => s + bal(a), 0);
-  const netWorth = totalAssets - totalOwed;
+  const totalLoans = loansInNetWorth ? state.accounts.filter((a) => a.kind === "loan").reduce((s, a) => s + bal(a), 0) : 0;
+  const netWorth = totalAssets - totalOwed - totalLoans;
   const liquidAssets = state.accounts.filter((a) => a.kind === "asset" && a.liquid).reduce((s, a) => s + bal(a), 0);
   const liquidOwed = state.accounts.filter((a) => a.kind === "owed" && a.liquid).reduce((s, a) => s + bal(a), 0);
   const netCash = liquidAssets - liquidOwed;
@@ -1255,16 +1267,20 @@ function Insights({ state, calc, update, theme }) {
     return (
       <div key={a.id} className="bt-acc-wrap">
         <div className="bt-acc">
-          <button type="button" className={"bt-kind " + a.kind} onClick={() => toggleKind(a.id)} title="Asset / owed">
-            {a.kind === "asset" ? "＋" : "−"}
+          <button type="button" className={"bt-kind " + a.kind} onClick={() => toggleKind(a.id)} title="Asset / owed / loan">
+            {a.kind === "asset" ? "＋" : a.kind === "owed" ? "−" : "📋"}
           </button>
           <input className="bt-acc-name" defaultValue={a.name} onBlur={(e) => renameAcc(a.id, e.target.value)} />
-          <button type="button" className={"bt-liq" + (a.liquid ? " on" : "")} onClick={() => toggleLiquid(a.id)} title="Move between cash and held">
-            {a.liquid ? "cash" : "held"}
-          </button>
-          <button type="button" className={"bt-split" + (a.breakdown ? " on" : "")} onClick={() => toggleBreakdown(a.id)} title="Split into multiple amounts (e.g. owed by different people)">
-            <Layers size={13} />
-          </button>
+          {a.kind !== "loan" && (
+            <button type="button" className={"bt-liq" + (a.liquid ? " on" : "")} onClick={() => toggleLiquid(a.id)} title="Move between cash and held">
+              {a.liquid ? "cash" : "held"}
+            </button>
+          )}
+          {a.kind !== "loan" && (
+            <button type="button" className={"bt-split" + (a.breakdown ? " on" : "")} onClick={() => toggleBreakdown(a.id)} title="Split into multiple amounts">
+              <Layers size={13} />
+            </button>
+          )}
           <div className="bt-amount-in xs">
             <span>€</span>
             {a.breakdown ? (
@@ -1373,6 +1389,12 @@ function Insights({ state, calc, update, theme }) {
             <div><span className="bt-muted">Net worth</span><strong className={netWorth < 0 ? "is-over" : ""}>{fmt(netWorth)}</strong></div>
           </div>
           <div className="bt-muted bt-tiny" style={{ marginTop: 8 }}>Net worth combines cash, held assets and anything owed.</div>
+          {state.accounts.some((a) => a.kind === "loan") && (
+            <label className="bt-loan-toggle" style={{ marginTop: 10, display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", cursor: "pointer" }}>
+              <input type="checkbox" checked={loansInNetWorth} onChange={(e) => setLoansInNetWorth(e.target.checked)} style={{ cursor: "pointer" }} />
+              <span>Include loan in net worth calculation</span>
+            </label>
+          )}
           {snapStale && (
             <div className="bt-recon-flag warn" style={{ marginTop: 10 }}>
               {lastSnap ? `Last snapshot was ${new Date(lastSnap.date).toLocaleDateString("en-IE", { day: "2-digit", month: "short" })} — update your balances and save a fresh one.` : "Save your first snapshot to start tracking wealth over time."}
@@ -1387,6 +1409,41 @@ function Insights({ state, calc, update, theme }) {
           <div className="bt-muted bt-tiny" style={{ marginTop: 6 }}>Records {fmt(heldTotal)} held assets as a dated point on the trend below.</div>
         </section>
       </div>
+
+      {state.accounts.filter((a) => a.kind === "loan").length > 0 && (
+        <div className="bt-insrow">
+          {/* LOANS */}
+          <section className="bt-card">
+            <div className="bt-card-h">Loans</div>
+            {state.accounts.filter((a) => a.kind === "loan").map((loan) => {
+              const curr = m.balances[loan.id] || 0;
+              const meta = loan.loanMeta;
+              if (!meta) return null;
+              const paidOff = meta.originalAmount - curr;
+              const pct = meta.originalAmount > 0 ? Math.round((paidOff / meta.originalAmount) * 100) : 0;
+              const disbDate = new Date(meta.disbursalDate);
+              const endDate = new Date(disbDate.getFullYear(), disbDate.getMonth() + meta.term, disbDate.getDate());
+              return (
+                <div key={loan.id} className="bt-loan-card bt-mono bt-tiny">
+                  <div className="bt-loan-header">
+                    <span className="bt-text">{loan.name}</span>
+                    <span className={loan.excludeFromNetWorth ? "bt-muted" : ""}>{fmt(curr)}</span>
+                  </div>
+                  <div className="bt-loan-bar" style={{ height: "6px", background: "var(--surface2)", borderRadius: "3px", overflow: "hidden", marginTop: "6px" }}>
+                    <div style={{ height: "100%", width: `${pct}%`, background: "#7FB3A6" }} />
+                  </div>
+                  <div className="bt-loan-stats">
+                    <div><span className="bt-muted">Paid off:</span> <span>{fmt(paidOff)} ({pct}%)</span></div>
+                    <div><span className="bt-muted">Original:</span> <span>{fmt(meta.originalAmount)}</span></div>
+                    <div><span className="bt-muted">Rate:</span> <span>{meta.interestRate}%</span></div>
+                    <div><span className="bt-muted">Payoff date:</span> <span>{endDate.toLocaleDateString("en-IE", { month: "short", year: "2-digit" })}</span></div>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
+        </div>
+      )}
 
       <div className="bt-insrow">
         {/* HELD ASSETS OVER TIME */}
@@ -1751,19 +1808,26 @@ function ReportSheet({ state, onClose }) {
           {sec.ratio && d.income > 0 && (
             <div className="bt-rep-sec">
               <div className="bt-rep-sec-h">50 / 30 / 20 vs actual <span>on {fmt(d.income)}</span></div>
-              <div className="bt-rep-ratio-header" style={{ fontSize: "11px", color: "#8A909C", display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: "10px", paddingBottom: "4px", borderBottom: "1px solid #E2E5EA" }}>
-                <span></span>
-                <span>Actual</span>
-                <span>Planned</span>
-                <span>Diff</span>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: "8px 10px", fontSize: "12.5px", fontFamily: "'IBM Plex Mono',monospace" }}>
+                <div style={{ display: "contents", fontSize: "11px" }}>
+                  <span style={{ paddingBottom: "4px", borderBottom: "1px solid #E2E5EA", color: "#8A909C" }}></span>
+                  <span style={{ paddingBottom: "4px", borderBottom: "1px solid #E2E5EA", color: "#8A909C" }}>Actual</span>
+                  <span style={{ paddingBottom: "4px", borderBottom: "1px solid #E2E5EA", color: "#8A909C" }}>Planned</span>
+                  <span style={{ paddingBottom: "4px", borderBottom: "1px solid #E2E5EA", color: "#8A909C" }}>Diff</span>
+                </div>
+                {[["Needs", d.groups[0].planned, d.ideal.needs, true], ["Wants", d.groups[1].planned, d.ideal.wants, true], ["Savings & Debt", d.groups[2].planned, d.ideal.savings, false]].map(([l, got, want, lowerIsBetter]) => {
+                  const diff = got - want;
+                  const good = lowerIsBetter ? diff <= 0 : diff >= 0;
+                  return (
+                    <div key={l} style={{ display: "contents" }}>
+                      <span style={{ paddingTop: "4px", paddingBottom: "4px" }}>{l}</span>
+                      <span style={{ paddingTop: "4px", paddingBottom: "4px" }}>{fmt(got)}</span>
+                      <span style={{ paddingTop: "4px", paddingBottom: "4px", color: "#8A909C" }}>{fmt(want)}</span>
+                      <span style={{ paddingTop: "4px", paddingBottom: "4px", color: good ? "#3E9D63" : "#D1503F" }}>{diff >= 0 ? "+" : "−"}{fmt(Math.abs(diff))}</span>
+                    </div>
+                  );
+                })}
               </div>
-              {[["Needs", d.groups[0].planned, d.ideal.needs, true], ["Wants", d.groups[1].planned, d.ideal.wants, true], ["Savings & Debt", d.groups[2].planned, d.ideal.savings, false]].map(([l, got, want, lowerIsBetter]) => {
-                const diff = got - want;
-                const good = lowerIsBetter ? diff <= 0 : diff >= 0;
-                return (
-                  <div key={l} className="bt-rep-line" style={{ gridTemplateColumns: "1fr auto auto auto" }}><span>{l}</span><span>{fmt(got)}</span><span style={{ color: "#8A909C" }}>{fmt(want)}</span><span style={{ color: good ? "#3E9D63" : "#D1503F" }}>{diff >= 0 ? "+" : "−"}{fmt(Math.abs(diff))}</span></div>
-                );
-              })}
             </div>
           )}
 
@@ -2000,6 +2064,11 @@ function Style() {
         font-size:16px;font-weight:600;line-height:1;flex:0 0 auto;}
       .bt-kind.asset{color:var(--under);border-color:rgba(79,180,119,.4);}
       .bt-kind.owed{color:var(--over);border-color:rgba(224,105,92,.4);}
+      .bt-loan-card{padding:10px;background:var(--surface2);border-radius:10px;margin-bottom:10px;}
+      .bt-loan-header{display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;}
+      .bt-loan-stats{display:flex;flex-direction:column;gap:3px;margin-top:8px;font-size:11px;}
+      .bt-loan-stats div{display:flex;justify-content:space-between;}
+      .bt-loan-stats .bt-muted{color:var(--muted);}
       .bt-acc-name{flex:1;min-width:0;background:none;border:none;color:var(--text);font:inherit;font-size:13.5px;padding:4px 2px;border-bottom:1px solid transparent;}
       .bt-acc-name:focus{outline:none;border-bottom-color:var(--accent);}
       .bt-split{width:28px;height:28px;border-radius:8px;border:1px solid var(--line);background:var(--surface2);color:var(--muted);flex:0 0 auto;display:flex;align-items:center;justify-content:center;}
@@ -2084,7 +2153,9 @@ function Style() {
         body *{visibility:hidden;}
         .bt-report,.bt-report *{visibility:visible;}
         .bt-report{position:absolute;left:0;top:0;width:100%;box-shadow:none;border-radius:0;padding:0;}
-        .bt-noprint{display:none !important;}
+        .bt-noprint{display:none !important;visibility:hidden !important;height:0 !important;margin:0 !important;padding:0 !important;overflow:hidden !important;}
+        .bt-report-toolbar{display:none !important;visibility:hidden !important;height:0 !important;margin:0 !important;padding:0 !important;overflow:hidden !important;position:absolute;left:-9999px;}
+        .bt-report-secsel{display:none !important;visibility:hidden !important;height:0 !important;margin:0 !important;padding:0 !important;overflow:hidden !important;position:absolute;left:-9999px;}
       }
       @media (min-width:900px){
         .bt-root{max-width:1140px;padding:0 28px 28px;display:grid;
