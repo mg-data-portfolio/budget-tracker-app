@@ -1392,8 +1392,15 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
   const snapStale = lastSnap ? (Date.now() - new Date(lastSnap.date).getTime()) > 28 * 864e5 : !lastSnap;
   const groupData = calc.groups.map((g) => ({ name: g.label.split(" ")[0], Planned: g.planned, Actual: g.actual }));
 
-  // budget suggestions: variable categories with >=2 months of logged spend consistently off plan
-  const activeIds = Object.keys(state.months).filter((id) => (state.months[id].txns || []).some((t) => !t.fixed));
+  // a month is "complete" once the *next* month's payday has actually arrived —
+  // that's the point its budget cycle is truly closed out, not just data-present.
+  const today = new Date();
+  const isMonthComplete = (id) => computePaydayDate(nextMonthId(id)) <= today;
+  const completeSeries = series.filter((x) => isMonthComplete(x.id));
+
+  // budget suggestions: variable categories with >=2 *complete* months of logged spend
+  // consistently off plan (so nothing is suggested until you're into the 3rd month).
+  const activeIds = Object.keys(state.months).filter((id) => isMonthComplete(id) && (state.months[id].txns || []).some((t) => !t.fixed));
   const suggestions = state.categories.filter((c) => !c.fixed).map((c) => {
     const vals = activeIds.map((id) => (state.months[id].txns || []).filter((t) => t.cat === c.id && !t.fixed).reduce((a, t) => a + t.amount, 0));
     const n = vals.length;
@@ -1608,13 +1615,13 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
       </div>
 
       {/* LEFT AT MONTH-END */}
-      {series.length > 1 && (
+      {completeSeries.length > 1 && (
         <div className="bt-insrow">
           <section className="bt-card">
             <div className="bt-card-h">Left at month-end</div>
             <div className="bt-chart">
               <ResponsiveContainer width="100%" height={180}>
-                <LineChart data={series}>
+                <LineChart data={completeSeries}>
                   <CartesianGrid strokeDasharray="3 3" stroke={cGrid} vertical={false} />
                   <XAxis dataKey="label" {...axis} axisLine={{ stroke: cAxisLine }} tickLine={false} />
                   <YAxis {...axis} axisLine={false} tickLine={false} width={38} tickFormatter={(v) => "€" + v} />
@@ -1810,7 +1817,9 @@ function reportData(state, monthId) {
   const heldList = snap ? state.accounts.filter((a) => !a.liquid && (snap.balances?.[a.id] ?? 0) !== 0)
     .map((a) => ({ name: a.name, amt: snap.balances[a.id] || 0 })).sort((x, y) => y.amt - x.amt) : [];
 
-  const activeIds = Object.keys(state.months).filter((id) => (state.months[id].txns || []).some((t) => !t.fixed));
+  const today = new Date();
+  const isMonthComplete = (id) => computePaydayDate(nextMonthId(id)) <= today;
+  const activeIds = Object.keys(state.months).filter((id) => isMonthComplete(id) && (state.months[id].txns || []).some((t) => !t.fixed));
   const suggestions = state.categories.filter((c) => !c.fixed).map((c) => {
     const vals = activeIds.map((id) => (state.months[id].txns || []).filter((t) => t.cat === c.id && !t.fixed).reduce((a, t) => a + t.amount, 0));
     const n = vals.length, avg = n ? vals.reduce((a, b) => a + b, 0) / n : 0;
