@@ -760,13 +760,20 @@ function Ratio503020({ calc }) {
   return (
     <section className="bt-card">
       <div className="bt-card-h">50 / 30 / 20 check<span className="bt-muted bt-mono"> on {fmt(incomeActual)}</span></div>
+      <div className="bt-ratio-header bt-mono">
+        <span></span>
+        <span className="bt-muted">Actual</span>
+        <span className="bt-muted">Planned</span>
+        <span className="bt-muted">Diff</span>
+      </div>
       {rows.map((r) => {
-        const diff = r.got - r.want; // +ve = spent/saved more than the ideal
+        const diff = r.got - r.want;
         const good = r.lowerIsBetter ? diff <= 0 : diff >= 0;
         return (
           <div key={r.label} className="bt-ratio-row bt-mono">
             <span>{r.label}</span>
-            <span className="bt-muted">{fmt(r.got)} / {fmt(r.want)}</span>
+            <span>{fmt(r.got)}</span>
+            <span className="bt-muted">{fmt(r.want)}</span>
             <span className={good ? "is-under" : "is-over"}>{fmtSigned(diff)}</span>
           </div>
         );
@@ -1742,11 +1749,17 @@ function ReportSheet({ state, onClose }) {
           {sec.ratio && d.income > 0 && (
             <div className="bt-rep-sec">
               <div className="bt-rep-sec-h">50 / 30 / 20 vs actual <span>on {fmt(d.income)}</span></div>
+              <div className="bt-rep-ratio-header" style={{ fontSize: "11px", color: "#8A909C", display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: "10px", paddingBottom: "4px", borderBottom: "1px solid #E2E5EA" }}>
+                <span></span>
+                <span>Actual</span>
+                <span>Planned</span>
+                <span>Diff</span>
+              </div>
               {[["Needs", d.groups[0].planned, d.ideal.needs, true], ["Wants", d.groups[1].planned, d.ideal.wants, true], ["Savings & Debt", d.groups[2].planned, d.ideal.savings, false]].map(([l, got, want, lowerIsBetter]) => {
                 const diff = got - want;
                 const good = lowerIsBetter ? diff <= 0 : diff >= 0;
                 return (
-                  <div key={l} className="bt-rep-line"><span>{l}</span><span>{fmt(got)} <i>/ {fmt(want)}</i></span><span style={{ color: good ? "#3E9D63" : "#D1503F" }}>{diff >= 0 ? "+" : "−"}{fmt(Math.abs(diff))}</span></div>
+                  <div key={l} className="bt-rep-line" style={{ gridTemplateColumns: "1fr auto auto auto" }}><span>{l}</span><span>{fmt(got)}</span><span style={{ color: "#8A909C" }}>{fmt(want)}</span><span style={{ color: good ? "#3E9D63" : "#D1503F" }}>{diff >= 0 ? "+" : "−"}{fmt(Math.abs(diff))}</span></div>
                 );
               })}
             </div>
@@ -1869,7 +1882,8 @@ function Style() {
       .bt-track-fill{height:100%;border-radius:5px;transition:width .3s ease;}
       .bt-track-mark{position:absolute;top:-1px;width:2px;height:10px;background:var(--text);opacity:.5;}
 
-      .bt-ratio-row{display:grid;grid-template-columns:1fr auto auto;gap:10px;font-size:13px;padding:6px 0;align-items:center;}
+      .bt-ratio-row{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;font-size:13px;padding:6px 0;align-items:center;}
+      .bt-ratio-header{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;font-size:11px;padding:8px 0 4px;border-bottom:1px solid var(--line);}
       .bt-ratio-row .bt-muted{font-size:12px;}
 
       .bt-back{background:none;border:none;color:var(--muted);display:flex;align-items:center;gap:4px;font-size:13px;padding:2px 0;}
