@@ -1616,10 +1616,16 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
       </div>
 
       {/* LEFT AT MONTH-END */}
-      {completeSeries.length > 1 && (
-        <div className="bt-insrow">
-          <section className="bt-card">
-            <div className="bt-card-h">Left at month-end</div>
+      <div className="bt-insrow">
+        <section className="bt-card">
+          <div className="bt-card-h">Left at month-end</div>
+          {completeSeries.length < 2 ? (
+            <div className="bt-muted bt-tiny">
+              {completeSeries.length === 0
+                ? "This will start tracking once a full budget month has passed (your current month's cycle isn't closed out yet)."
+                : "1 complete month so far — check back after next payday to see the trend."}
+            </div>
+          ) : (
             <div className="bt-chart">
               <ResponsiveContainer width="100%" height={180}>
                 <LineChart data={completeSeries}>
@@ -1631,9 +1637,9 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
                 </LineChart>
               </ResponsiveContainer>
             </div>
-          </section>
-        </div>
-      )}
+          )}
+        </section>
+      </div>
 
       <div className="bt-insrow">
         {/* BUDGET SUGGESTIONS */}
