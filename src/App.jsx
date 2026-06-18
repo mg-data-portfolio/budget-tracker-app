@@ -676,7 +676,13 @@ export default function App() {
   };
   const paydayDate = computePaydayDate(state.current);
   const paydayLabel = paydayDate.toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" });
-  const isPaid = paydayDate <= new Date();
+  const todayMidnight = new Date();
+  todayMidnight.setHours(0, 0, 0, 0);
+  const paydayMidnight = new Date(paydayDate);
+  paydayMidnight.setHours(0, 0, 0, 0);
+  const daysUntilPayday = Math.round((paydayMidnight - todayMidnight) / 86400000);
+  const isPaid = daysUntilPayday <= 0;
+  const countdownLabel = daysUntilPayday === 0 ? "today" : daysUntilPayday === 1 ? "in 1 day" : `in ${daysUntilPayday} days`;
 
   return (
     <div className={rootClass}>
@@ -689,7 +695,7 @@ export default function App() {
         <div className="bt-month">
           <div className="bt-month-name">{monthMeta(state.current).label}</div>
           <div className="bt-month-sub bt-mono">
-            {isPaid ? "Paid: " : "Payday: "}{paydayLabel}
+            {isPaid ? `Paid: ${paydayLabel}` : `Payday: ${paydayLabel} · ${countdownLabel}`}
           </div>
         </div>
         <div className="bt-hdr-right">
