@@ -760,24 +760,26 @@ function Ratio503020({ calc }) {
   return (
     <section className="bt-card">
       <div className="bt-card-h">50 / 30 / 20 check<span className="bt-muted bt-mono"> on {fmt(incomeActual)}</span></div>
-      <div className="bt-ratio-header bt-mono">
-        <span></span>
-        <span className="bt-muted">Actual</span>
-        <span className="bt-muted">Planned</span>
-        <span className="bt-muted">Diff</span>
+      <div className="bt-ratio-grid bt-mono">
+        <div className="bt-ratio-header">
+          <span></span>
+          <span className="bt-muted">Actual</span>
+          <span className="bt-muted">Planned</span>
+          <span className="bt-muted">Diff</span>
+        </div>
+        {rows.map((r) => {
+          const diff = r.got - r.want;
+          const good = r.lowerIsBetter ? diff <= 0 : diff >= 0;
+          return (
+            <div key={r.label} className="bt-ratio-row">
+              <span>{r.label}</span>
+              <span>{fmt(r.got)}</span>
+              <span className="bt-muted">{fmt(r.want)}</span>
+              <span className={good ? "is-under" : "is-over"}>{fmtSigned(diff)}</span>
+            </div>
+          );
+        })}
       </div>
-      {rows.map((r) => {
-        const diff = r.got - r.want;
-        const good = r.lowerIsBetter ? diff <= 0 : diff >= 0;
-        return (
-          <div key={r.label} className="bt-ratio-row bt-mono">
-            <span>{r.label}</span>
-            <span>{fmt(r.got)}</span>
-            <span className="bt-muted">{fmt(r.want)}</span>
-            <span className={good ? "is-under" : "is-over"}>{fmtSigned(diff)}</span>
-          </div>
-        );
-      })}
     </section>
   );
 }
@@ -1882,8 +1884,12 @@ function Style() {
       .bt-track-fill{height:100%;border-radius:5px;transition:width .3s ease;}
       .bt-track-mark{position:absolute;top:-1px;width:2px;height:10px;background:var(--text);opacity:.5;}
 
-      .bt-ratio-row{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;font-size:13px;padding:6px 0;align-items:center;}
-      .bt-ratio-header{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;font-size:11px;padding:8px 0 4px;border-bottom:1px solid var(--line);}
+      .bt-ratio-grid{display:grid;grid-template-columns:1fr auto auto auto;gap:8px 10px;font-size:13px;}
+      .bt-ratio-header{display:contents;font-size:11px;}
+      .bt-ratio-header span{padding:8px 0 4px;border-bottom:1px solid var(--line);}
+      .bt-ratio-header span:first-child{border-bottom:none;}
+      .bt-ratio-row{display:contents;padding:6px 0;align-items:center;}
+      .bt-ratio-row span{padding:6px 0;}
       .bt-ratio-row .bt-muted{font-size:12px;}
 
       .bt-back{background:none;border:none;color:var(--muted);display:flex;align-items:center;gap:4px;font-size:13px;padding:2px 0;}
