@@ -442,7 +442,20 @@ function useBudget() {
   const stateRef = useRef(null);
   const pushTimer = useRef(null);
 
-  // initial load: local first, then reconcile with remote if a code is set
+  // A state is "empty" if it has no logged transactions and no balances set across all months.
+  // We never push an empty state to the cloud — it would silently overwrite real data
+  // on a device that just had its storage cleared.
+  const isEmpty = (s) => {
+    if (!s || !s.months) return true;
+    return Object.values(s.months).every((m) =>
+      (!m.txns || m.txns.length === 0) &&
+      (!m.incomeTxns || m.incomeTxns.length === 0) &&
+      (!m.balances || Object.values(m.balances).every((v) => !v || v === 0))
+    );
+  };
+
+  // initial load: local first, then reconcile with remote if a code is set.
+  // Remote always wins when local is empty (cleared storage), otherwise timestamp wins.
   useEffect(() => {
     (async () => {
       const loaded = await loadState();
@@ -453,13 +466,19 @@ function useBudget() {
         setSync((s) => ({ ...s, status: "syncing" }));
         try {
           const remote = await pullRemote(code);
-          if (remote && (remote.updatedAt || 0) > updatedAtRef.current) {
-            data = migrate(remote.data);
-            updatedAtRef.current = remote.updatedAt;
-            await saveState(data);
-            setLocalUpdatedAt(updatedAtRef.current);
-          } else {
-            await pushRemote(code, data, updatedAtRef.current);
+          if (remote) {
+            const localIsEmpty = isEmpty(data);
+            const remoteIsNewer = (remote.updatedAt || 0) > updatedAtRef.current;
+            // Use remote if: local is empty (cleared storage) OR remote has a newer timestamp
+            if (localIsEmpty || remoteIsNewer) {
+              data = migrate(remote.data);
+              updatedAtRef.current = remote.updatedAt;
+              await saveState(data);
+              setLocalUpdatedAt(updatedAtRef.current);
+            } else if (!isEmpty(data)) {
+              // Only push local to remote if local is non-empty and actually newer
+              await pushRemote(code, data, updatedAtRef.current);
+            }
           }
           setSync({ code, status: "ok" });
         } catch (_) { setSync({ code, status: "error" }); }
@@ -470,7 +489,8 @@ function useBudget() {
     })();
   }, []);
 
-  // persist locally + debounced push to cloud whenever state changes
+  // persist locally + debounced push to cloud whenever state changes.
+  // Guard: never push an empty state to the cloud.
   useEffect(() => {
     if (!ready || !state) return;
     stateRef.current = state;
@@ -479,6 +499,7 @@ function useBudget() {
     setLocalUpdatedAt(updatedAtRef.current);
     const code = getSyncCode();
     if (!code) return;
+    if (isEmpty(state)) return; // never overwrite cloud with blank slate
     clearTimeout(pushTimer.current);
     pushTimer.current = setTimeout(async () => {
       setSync((s) => ({ ...s, status: "syncing" }));
@@ -493,21 +514,31 @@ function useBudget() {
     setState((prev) => (typeof fn === "function" ? fn(prev) : fn));
   }, []);
 
-  // connect: validates the code, pulls remote (using it if newer) or pushes local up
+  // connect: validates the code, pulls remote (always preferred over empty local),
+  // or pushes local up only if local is non-empty and actually newer.
   const connectSync = useCallback(async (rawCode) => {
     const code = (rawCode || "").trim();
     if (code.length < 6) return { ok: false, error: "Code must be at least 6 characters" };
     setSync({ code, status: "syncing" });
     try {
       const remote = await pullRemote(code);
-      if (remote && (remote.updatedAt || 0) > updatedAtRef.current) {
-        const data = migrate(remote.data);
-        updatedAtRef.current = remote.updatedAt;
-        await saveState(data);
-        setLocalUpdatedAt(updatedAtRef.current);
-        stateRef.current = data;
-        setState(data);
-      } else {
+      if (remote) {
+        const localIsEmpty = isEmpty(stateRef.current);
+        const remoteIsNewer = (remote.updatedAt || 0) > updatedAtRef.current;
+        if (localIsEmpty || remoteIsNewer) {
+          const data = migrate(remote.data);
+          updatedAtRef.current = remote.updatedAt;
+          await saveState(data);
+          setLocalUpdatedAt(updatedAtRef.current);
+          stateRef.current = data;
+          setState(data);
+        } else if (!isEmpty(stateRef.current)) {
+          updatedAtRef.current = Date.now();
+          await pushRemote(code, stateRef.current, updatedAtRef.current);
+          setLocalUpdatedAt(updatedAtRef.current);
+        }
+      } else if (!isEmpty(stateRef.current)) {
+        // Nothing in cloud yet — push local up only if it has real data
         updatedAtRef.current = Date.now();
         await pushRemote(code, stateRef.current, updatedAtRef.current);
         setLocalUpdatedAt(updatedAtRef.current);
