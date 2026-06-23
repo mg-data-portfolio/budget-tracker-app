@@ -1683,18 +1683,32 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
         <section className="bt-card">
           <div className="bt-card-h">Budget suggestions</div>
           {suggestions.length === 0 ? (
-            <div className="bt-muted bt-tiny">No changes suggested yet. Once a variable category has 2+ months of logged spend that's consistently off its plan, a tweak will appear here with a one-tap apply.</div>
-          ) : suggestions.map(({ c, n, avg, suggested, dev }) => (
-            <div key={c.id} className="bt-sugg">
-              <div className="bt-sugg-mid">
-                <div className="bt-sugg-name">{c.name}</div>
-                <div className="bt-muted bt-tiny bt-mono">avg {fmt(avg)} / {n} mo · now {fmt(c.planned)}</div>
+            <div className="bt-muted bt-tiny">No changes suggested yet. Once a variable category has 2+ months of logged spend that's consistently off its plan, a tweak will appear here.</div>
+          ) : suggestions.map(({ c, n, avg, suggested, dev }) => {
+            const isOver = dev > 0;
+            return (
+              <div key={c.id} className="bt-sugg">
+                <div className="bt-sugg-mid">
+                  <div className="bt-sugg-name">{c.name}</div>
+                  <div className="bt-muted bt-tiny bt-mono">
+                    avg {fmt(avg)} / {n} mo · planned {fmt(c.planned)}
+                  </div>
+                  {isOver && (
+                    <div className="bt-sugg-hint bt-tiny">
+                      Reduce spending by {fmt(Math.abs(dev))} to stay on plan
+                    </div>
+                  )}
+                </div>
+                {isOver ? (
+                  <span className="bt-sugg-flag is-over">▲ {fmt(avg)}</span>
+                ) : (
+                  <button type="button" className="bt-sugg-apply" onClick={() => setPlanned(c.id, suggested)}>
+                    <span className="is-under">▼ lower to {fmt(suggested)}</span>
+                  </button>
+                )}
               </div>
-              <button type="button" className="bt-sugg-apply" onClick={() => setPlanned(c.id, suggested)}>
-                <span className={dev > 0 ? "is-over" : "is-under"}>{dev > 0 ? "▲ raise to" : "▼ lower to"} {fmt(suggested)}</span>
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </section>
 
         {/* LONGER TERM */}
@@ -2245,6 +2259,8 @@ function Style() {
       .bt-sugg:first-of-type{border-top:none;}
       .bt-sugg-mid{flex:1;min-width:0;}
       .bt-sugg-name{font-size:13.5px;font-weight:500;}
+      .bt-sugg-hint{color:var(--over);margin-top:3px;}
+      .bt-sugg-flag{flex:0 0 auto;font-size:12px;font-weight:600;font-family:'IBM Plex Mono',monospace;padding:7px 10px;background:rgba(224,105,92,.1);border:1px solid rgba(224,105,92,.3);border-radius:10px;}
       .bt-sugg-apply{flex:0 0 auto;background:var(--surface2);border:1px solid var(--line);border-radius:10px;
         padding:9px 12px;font:inherit;font-size:12.5px;font-weight:600;color:var(--text);}
       .bt-lt{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
