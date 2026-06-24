@@ -1,4 +1,28 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e) { return { error: e }; }
+  componentDidCatch(e, info) { console.error("App crash:", e, info); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 24, fontFamily: "monospace", fontSize: 13, background: "#14161A", color: "#E05C5C", minHeight: "100vh" }}>
+          <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 12 }}>App crashed — copy this and send to support:</div>
+          <div style={{ background: "#1C1F26", padding: 16, borderRadius: 10, wordBreak: "break-all", whiteSpace: "pre-wrap" }}>
+            {this.state.error.toString()}{"\n\n"}{this.state.error.stack}
+          </div>
+          <button onClick={() => { localStorage.clear(); window.location.reload(); }}
+            style={{ marginTop: 20, padding: "12px 20px", background: "#C9A24A", color: "#000", border: "none", borderRadius: 10, fontWeight: 700, fontSize: 14 }}>
+            Clear data &amp; reload
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 import {
   Plus, ChevronLeft, ChevronRight, X, Trash2, SlidersHorizontal,
   LayoutGrid, Receipt, Check, PencilLine, BarChart3,
@@ -441,10 +465,14 @@ function useBudget() {
   const updatedAtRef = useRef(0);
   const stateRef = useRef(null);
   const pushTimer = useRef(null);
+  // true when localStorage had NO saved state (fresh install / cleared storage).
+  // In this case we must ALWAYS pull from remote, never push — the SEED data has
+  // preset account balances which would fool a simple isEmpty() check into thinking
+  // there's real local data worth pushing up.
+  const freshInstallRef = useRef(false);
 
-  // A state is "empty" if it has no logged transactions and no balances set across all months.
-  // We never push an empty state to the cloud — it would silently overwrite real data
-  // on a device that just had its storage cleared.
+  // isEmpty: state with no logged transactions and no user-entered balances.
+  // Note: this alone is insufficient for SEED data detection — use freshInstallRef instead.
   const isEmpty = (s) => {
     if (!s || !s.months) return true;
     return Object.values(s.months).every((m) =>
@@ -455,28 +483,29 @@ function useBudget() {
   };
 
   // initial load: local first, then reconcile with remote if a code is set.
-  // Remote always wins when local is empty (cleared storage), otherwise timestamp wins.
+  // On fresh install, remote ALWAYS wins — we never push SEED data up.
   useEffect(() => {
     (async () => {
       const loaded = await loadState();
+      const isFresh = !loaded; // true when localStorage was empty / cleared
+      freshInstallRef.current = isFresh;
       let data = migrate(loaded ?? SEED);
-      updatedAtRef.current = getLocalUpdatedAt() || Date.now();
+      // On fresh install, use timestamp 0 so any real remote data is always "newer"
+      updatedAtRef.current = isFresh ? 0 : (getLocalUpdatedAt() || Date.now());
       const code = getSyncCode();
       if (code) {
         setSync((s) => ({ ...s, status: "syncing" }));
         try {
           const remote = await pullRemote(code);
           if (remote) {
-            const localIsEmpty = isEmpty(data);
             const remoteIsNewer = (remote.updatedAt || 0) > updatedAtRef.current;
-            // Use remote if: local is empty (cleared storage) OR remote has a newer timestamp
-            if (localIsEmpty || remoteIsNewer) {
+            if (isFresh || remoteIsNewer) {
               data = migrate(remote.data);
               updatedAtRef.current = remote.updatedAt;
               await saveState(data);
               setLocalUpdatedAt(updatedAtRef.current);
-            } else if (!isEmpty(data)) {
-              // Only push local to remote if local is non-empty and actually newer
+              freshInstallRef.current = false;
+            } else if (!isFresh) {
               await pushRemote(code, data, updatedAtRef.current);
             }
           }
@@ -490,7 +519,7 @@ function useBudget() {
   }, []);
 
   // persist locally + debounced push to cloud whenever state changes.
-  // Guard: never push an empty state to the cloud.
+  // Never push on a fresh install (until remote has been successfully pulled first).
   useEffect(() => {
     if (!ready || !state) return;
     stateRef.current = state;
@@ -499,6 +528,7 @@ function useBudget() {
     setLocalUpdatedAt(updatedAtRef.current);
     const code = getSyncCode();
     if (!code) return;
+    if (freshInstallRef.current) return; // still fresh — don't push until we've pulled
     if (isEmpty(state)) return; // never overwrite cloud with blank slate
     clearTimeout(pushTimer.current);
     pushTimer.current = setTimeout(async () => {
@@ -514,8 +544,7 @@ function useBudget() {
     setState((prev) => (typeof fn === "function" ? fn(prev) : fn));
   }, []);
 
-  // connect: validates the code, pulls remote (always preferred over empty local),
-  // or pushes local up only if local is non-empty and actually newer.
+  // connect: on fresh install, always pull. Otherwise use timestamp to decide.
   const connectSync = useCallback(async (rawCode) => {
     const code = (rawCode || "").trim();
     if (code.length < 6) return { ok: false, error: "Code must be at least 6 characters" };
@@ -523,22 +552,23 @@ function useBudget() {
     try {
       const remote = await pullRemote(code);
       if (remote) {
-        const localIsEmpty = isEmpty(stateRef.current);
+        const isFresh = freshInstallRef.current;
         const remoteIsNewer = (remote.updatedAt || 0) > updatedAtRef.current;
-        if (localIsEmpty || remoteIsNewer) {
+        if (isFresh || remoteIsNewer) {
           const data = migrate(remote.data);
           updatedAtRef.current = remote.updatedAt;
           await saveState(data);
           setLocalUpdatedAt(updatedAtRef.current);
           stateRef.current = data;
           setState(data);
-        } else if (!isEmpty(stateRef.current)) {
+          freshInstallRef.current = false;
+        } else if (!isFresh && !isEmpty(stateRef.current)) {
           updatedAtRef.current = Date.now();
           await pushRemote(code, stateRef.current, updatedAtRef.current);
           setLocalUpdatedAt(updatedAtRef.current);
         }
-      } else if (!isEmpty(stateRef.current)) {
-        // Nothing in cloud yet — push local up only if it has real data
+      } else if (!freshInstallRef.current && !isEmpty(stateRef.current)) {
+        // Nothing in cloud yet — only push if we have real local data
         updatedAtRef.current = Date.now();
         await pushRemote(code, stateRef.current, updatedAtRef.current);
         setLocalUpdatedAt(updatedAtRef.current);
@@ -646,7 +676,8 @@ function useMonthCalc(state) {
 }
 
 /* =============================== UI =============================== */
-export default function App() {
+export default function App() { return <ErrorBoundary><AppInner /></ErrorBoundary>; }
+function AppInner() {
   const { state, ready, update, sync, connectSync, disconnectSync } = useBudget();
   const calc = useMonthCalc(state);
   const [tab, setTab] = useState("overview"); // overview | activity | plan
