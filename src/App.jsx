@@ -26,7 +26,7 @@ class ErrorBoundary extends React.Component {
 import {
   Plus, ChevronLeft, ChevronRight, X, Trash2, SlidersHorizontal,
   LayoutGrid, Receipt, Check, PencilLine, BarChart3,
-  Settings, Sun, Moon, Download, Upload, FileText, Layers,
+  Settings, Sun, Moon, Download, Upload, FileText, Layers, Lock, Unlock,
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -97,25 +97,14 @@ const SEED = {
     { id: uid(), group: "savings", name: "Car Loan (savings)", planned: 253, fixed: true },
   ],
   months: {
-    "2026-06": {
-      id: "2026-06", label: "June 2026", payday: "2026-05-29",
+    "2026-07": {
+      id: "2026-07", label: "July 2026", payday: "",
       income: { salary: 0, other: 0, prior: 0 }, txns: [], incomeTxns: [],
-      balances: {
-        "acc-holiday": 1105.12, "acc-emergency": 280.81, "acc-boi-sav": 2000.58,
-        "acc-boi-dep": 3626.15, "acc-irishlife": 7981.60, "acc-n26": 970.70, "acc-car-loan": 16707.70,
-      },
+      balances: {}, locked: false,
     },
   },
-  current: "2026-06",
-  wealthSnapshots: [
-    {
-      id: "snap-seed", date: "2026-06-16", total: 15964.96,
-      balances: {
-        "acc-holiday": 1105.12, "acc-emergency": 280.81, "acc-boi-sav": 2000.58,
-        "acc-boi-dep": 3626.15, "acc-irishlife": 7981.60, "acc-n26": 970.70,
-      },
-    },
-  ],
+  current: "2026-07",
+  wealthSnapshots: [],
 };
 
 /* ------------------------------- storage ------------------------------- */
@@ -455,6 +444,26 @@ function migrate(state) {
     s = { ...s, months, migratedMay2026V11: true };
   }
 
+  // V12: reset to July 2026 — remove May/June (which had issues), create a fresh July,
+  // and add a `locked` boolean to every month for the new lock-month feature.
+  if (!s.migratedJulyResetV12) {
+    let months = { ...s.months };
+    delete months["2026-05"];
+    delete months["2026-06"];
+    if (!months["2026-07"]) {
+      months["2026-07"] = {
+        id: "2026-07", label: monthMeta("2026-07").label, payday: "",
+        income: { salary: 0, other: 0, prior: 0 }, txns: [], incomeTxns: [], balances: {}, locked: false,
+      };
+    }
+    // add locked field to all remaining months
+    for (const id in months) {
+      months[id] = { ...months[id], locked: months[id].locked ?? false };
+    }
+    const current = ["2026-05", "2026-06"].includes(s.current) ? "2026-07" : s.current;
+    s = { ...s, months, current, migratedJulyResetV12: true };
+  }
+
   return s;
 }
 
@@ -730,6 +739,12 @@ function AppInner() {
     }
   };
 
+  const isLocked = !!(state.months[state.current]?.locked);
+  const toggleLock = () => update((s) => ({
+    ...s,
+    months: { ...s.months, [s.current]: { ...s.months[s.current], locked: !s.months[s.current].locked } },
+  }));
+
   const thisMonthId = todayMonthId();
   const isCurrentMonth = state.current === thisMonthId;
   const goToCurrentMonth = () => {
@@ -755,7 +770,10 @@ function AppInner() {
           <ChevronLeft size={20} />
         </button>
         <div className="bt-month">
-          <div className="bt-month-name">{monthMeta(state.current).label}</div>
+          <div className="bt-month-name">
+            {isLocked && <Lock size={12} style={{ display: "inline", marginRight: 5, opacity: 0.5, verticalAlign: "middle" }} />}
+            {monthMeta(state.current).label}
+          </div>
           <div className="bt-month-sub bt-mono">
             {isPaid ? `Paid: ${paydayLabel}` : `Payday: ${paydayLabel} · ${countdownLabel}`}
           </div>
@@ -767,31 +785,40 @@ function AppInner() {
           <button className="bt-iconbtn" onClick={() => switchMonth(1)} aria-label="Next month">
             <ChevronRight size={20} />
           </button>
+          <button className={"bt-iconbtn" + (isLocked ? " lock-on" : "")} onClick={toggleLock} title={isLocked ? "Unlock month" : "Lock month"} aria-label="Toggle lock">
+            {isLocked ? <Lock size={17} /> : <Unlock size={17} />}
+          </button>
           <button className="bt-iconbtn" onClick={() => setEditSettings(true)} aria-label="Settings">
             <Settings size={19} />
           </button>
         </div>
       </header>
 
+      {isLocked && (
+        <div className="bt-lock-banner">
+          <Lock size={13} /> This month is locked — unlock to make changes
+        </div>
+      )}
+
       <main className="bt-main">
         {tab === "overview" && (
-          <Overview calc={calc} onOpenGroup={(g) => { setGroupView(g); setTab("plan"); }} onEditIncome={() => setEditIncome(true)} />
+          <Overview calc={calc} onOpenGroup={(g) => { setGroupView(g); setTab("plan"); }} onEditIncome={() => { if (!isLocked) setEditIncome(true); }} isLocked={isLocked} />
         )}
         {tab === "activity" && (
-          <Activity state={state} calc={calc} update={update} />
+          <Activity state={state} calc={calc} update={update} isLocked={isLocked} />
         )}
         {tab === "plan" && (
-          <Plan state={state} calc={calc} update={update} groupView={groupView} setGroupView={setGroupView} />
+          <Plan state={state} calc={calc} update={update} groupView={groupView} setGroupView={setGroupView} isLocked={isLocked} />
         )}
         {tab === "insights" && (
-          <Insights state={state} calc={calc} update={update} theme={theme} loansInNetWorth={loansInNetWorth} setLoansInNetWorth={setLoansInNetWorth} />
+          <Insights state={state} calc={calc} update={update} theme={theme} loansInNetWorth={loansInNetWorth} setLoansInNetWorth={setLoansInNetWorth} isLocked={isLocked} />
         )}
       </main>
 
       <nav className="bt-nav">
         <NavBtn active={tab === "overview"} icon={<LayoutGrid size={20} />} label="Overview" onClick={() => setTab("overview")} />
         <NavBtn active={tab === "activity"} icon={<Receipt size={20} />} label="Activity" onClick={() => setTab("activity")} />
-        <button className="bt-fab" onClick={() => setAdding(true)} aria-label="Add expense"><Plus size={24} /></button>
+        <button className={"bt-fab" + (isLocked ? " disabled" : "")} onClick={() => { if (!isLocked) setAdding(true); }} aria-label="Add expense" title={isLocked ? "Month is locked" : "Add expense"}><Plus size={24} /></button>
         <NavBtn active={tab === "plan"} icon={<SlidersHorizontal size={20} />} label="Plan" onClick={() => { setGroupView(null); setTab("plan"); }} />
         <NavBtn active={tab === "insights"} icon={<BarChart3 size={20} />} label="Insights" onClick={() => setTab("insights")} />
       </nav>
@@ -812,7 +839,7 @@ function NavBtn({ active, icon, label, onClick }) {
 }
 
 /* ------------------------------ OVERVIEW ------------------------------ */
-function Overview({ calc, onOpenGroup, onEditIncome }) {
+function Overview({ calc, onOpenGroup, onEditIncome, isLocked }) {
   const { incomeActual, spentActual, remainingActual, groups } = calc;
   const over = remainingActual < 0;
   const pctSpent = incomeActual > 0 ? Math.min(spentActual / incomeActual, 1) : 0;
@@ -935,7 +962,7 @@ function Ratio503020({ calc }) {
 }
 
 /* -------------------------------- PLAN -------------------------------- */
-function Plan({ state, calc, update, groupView, setGroupView }) {
+function Plan({ state, calc, update, groupView, setGroupView, isLocked }) {
   const [editing, setEditing] = useState(null); // category id
   const shown = groupView ? GROUPS.filter((g) => g.id === groupView) : GROUPS;
 
@@ -1005,7 +1032,7 @@ function Plan({ state, calc, update, groupView, setGroupView }) {
                       <input className="bt-input bt-input-num bt-mono" type="number" inputMode="decimal" defaultValue={c.planned}
                         onFocus={(e) => e.target.select()}
                         onBlur={(e) => setCat(c.id, { planned: parseFloat(e.target.value) || 0 })} />
-                      <button type="button" className="bt-del" onClick={() => delCat(c.id)}><Trash2 size={16} /></button>
+                      {!isLocked && <button type="button" className="bt-del" onClick={() => delCat(c.id)}><Trash2 size={16} /></button>}
                       <button type="button" className="bt-done" onClick={() => setEditing(null)}>Done</button>
                     </div>
                     <button type="button" className={"bt-fixed-toggle" + (c.fixed ? " on" : "")} onClick={() => setCat(c.id, { fixed: !c.fixed })}>
@@ -1030,7 +1057,7 @@ function Plan({ state, calc, update, groupView, setGroupView }) {
                         <Check size={15} strokeWidth={3} />
                       </button>
                     )}
-                    <button type="button" className="bt-line-main" onClick={() => setEditing(c.id)}>
+                    <button type="button" className="bt-line-main" onClick={() => { if (!isLocked) setEditing(c.id); }}>
                       <div className={"bt-line-name" + (c.paid ? " paid" : "")}>
                         {c.name}
                         {c.fixed && <span className="bt-tag">{c.paid ? "paid" : "fixed"}</span>}
@@ -1064,7 +1091,7 @@ function Plan({ state, calc, update, groupView, setGroupView }) {
 }
 
 /* ------------------------------ ACTIVITY ------------------------------ */
-function Activity({ state, calc, update }) {
+function Activity({ state, calc, update, isLocked }) {
   const month = state.months[state.current];
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("all");
@@ -1145,7 +1172,7 @@ function Activity({ state, calc, update }) {
                 <div className="bt-txn-sub bt-mono">{t.date} · income</div>
               </div>
               <div className="bt-txn-amt bt-mono is-under">{fmtSigned(t.amount)}</div>
-              <button type="button" className="bt-del" onClick={() => del(t)} aria-label="Delete"><Trash2 size={15} /></button>
+              {!isLocked && <button type="button" className="bt-del" onClick={() => del(t)} aria-label="Delete"><Trash2 size={15} /></button>}
             </div>
           );
         }
@@ -1158,7 +1185,7 @@ function Activity({ state, calc, update }) {
               <div className="bt-txn-sub bt-mono">{t.date}{t.note ? ` · ${t.note}` : ""}</div>
             </div>
             <div className="bt-txn-amt bt-mono">{fmt(t.amount)}</div>
-            <button type="button" className="bt-del" onClick={() => del(t)} aria-label="Delete"><Trash2 size={15} /></button>
+            {!isLocked && <button type="button" className="bt-del" onClick={() => del(t)} aria-label="Delete"><Trash2 size={15} /></button>}
           </div>
         );
       })}
@@ -1307,7 +1334,7 @@ function IncomeSheet({ state, calc, update, onClose }) {
 }
 
 /* ------------------------------ INSIGHTS ------------------------------ */
-function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWorth }) {
+function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWorth, isLocked }) {
   const m = state.months[state.current];
   const [snapDate, setSnapDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [showReport, setShowReport] = useState(false);
@@ -1426,7 +1453,7 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
               <input className="bt-input bt-mono is-computed" type="number" value={m.balances[a.id] ?? 0} readOnly tabIndex={-1} title="Total of the amounts below" />
             ) : (
               <input className="bt-input bt-mono" type="number" inputMode="decimal" value={m.balances[a.id] ?? ""}
-                placeholder="0" onFocus={(e) => e.target.select()} onChange={(e) => setBalance(a.id, e.target.value)} />
+                placeholder="0" onFocus={(e) => e.target.select()} onChange={(e) => { if (!isLocked) setBalance(a.id, e.target.value); }} readOnly={isLocked} />
             )}
           </div>
           <button type="button" className="bt-del" onClick={() => delAcc(a.id)} aria-label="Remove account"><Trash2 size={14} /></button>
@@ -1512,7 +1539,7 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
             Spendable balances, reconciled against what the budget says is left this month. Assets add, owed subtracts.
           </div>
           {liquidAccts.map(accRow)}
-          <button type="button" className="bt-add-cat" onClick={addAcc}><Plus size={14} /> Add cash account</button>
+          {!isLocked && <button type="button" className="bt-add-cat" onClick={addAcc}><Plus size={14} /> Add cash account</button>}
           <div className="bt-recon bt-mono">
             <div><span className="bt-muted">Net cash</span><strong>{fmt(netCash)}</strong></div>
             <div><span className="bt-muted">Budget says</span><strong>{fmt(expected)}</strong></div>
@@ -1530,7 +1557,7 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
             Savings and investments — your longer-term wealth. Update the balances each month to track growth.
           </div>
           {heldAccts.filter((a) => a.kind !== "loan").map(accRow)}
-          <button type="button" className="bt-add-cat" onClick={addHeld}><Plus size={14} /> Add holding</button>
+          {!isLocked && <button type="button" className="bt-add-cat" onClick={addHeld}><Plus size={14} /> Add holding</button>}
           <div className="bt-recon bt-mono">
             <div><span className="bt-muted">Held assets</span><strong>{fmt(heldTotal)}</strong></div>
             <div><span className="bt-muted">Net worth</span><strong className={netWorth < 0 ? "is-over" : ""}>{fmt(netWorth)}</strong></div>
@@ -2102,6 +2129,10 @@ function Style() {
       .bt-iconbtn:disabled{opacity:.35;}
       .bt-todaybtn{background:var(--surface);border:1px solid var(--line);color:var(--accent);
         font:inherit;font-size:12px;font-weight:600;border-radius:11px;padding:0 12px;height:38px;flex:0 0 auto;}
+      .bt-iconbtn.lock-on{color:var(--accent);border-color:rgba(201,162,74,.4);background:rgba(201,162,74,.1);}
+      .bt-lock-banner{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--accent);
+        background:rgba(201,162,74,.08);border-bottom:1px solid rgba(201,162,74,.2);padding:8px 16px;font-weight:500;}
+      .bt-fab.disabled{opacity:.4;cursor:default;}
 
       .bt-main{padding:16px;} .bt-stack{display:flex;flex-direction:column;gap:12px;}
       .bt-insrow{display:flex;flex-direction:column;gap:12px;}
