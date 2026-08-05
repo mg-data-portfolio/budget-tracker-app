@@ -26,7 +26,7 @@ class ErrorBoundary extends React.Component {
 import {
   Plus, ChevronLeft, ChevronRight, X, Trash2, SlidersHorizontal,
   LayoutGrid, Receipt, Check, PencilLine, BarChart3,
-  Settings, Sun, Moon, Download, Upload, FileText, Layers, Lock, Unlock,
+  Settings, Sun, Moon, Download, Upload, FileText, Layers, Lock, Unlock, ChevronUp, ChevronDown,
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -71,7 +71,7 @@ const SEED = {
     { id: "acc-boi-dep", name: "BOI Deposit Account", kind: "asset", liquid: false },
     { id: "acc-irishlife", name: "Irish Life Savings", kind: "asset", liquid: false },
     { id: "acc-n26", name: "N26 Investment", kind: "asset", liquid: false },
-    { id: "acc-car-loan", name: "Car Loan", kind: "loan", liquid: false, loanMeta: { originalAmount: 23250, interestRate: 6.31, term: 60, disbursalDate: "2024-11-08", repaymentDay: 1, linkedCategories: ["Car Loan Repayment", "Car Loan Savings"], monthlyPayment: 452.82 } },
+    { id: "acc-car-loan", name: "Car Loan", kind: "loan", liquid: false, loanMeta: { originalAmount: 23250, interestRate: 6.31, term: 60, disbursalDate: "2024-11-08", repaymentDay: 1, linkedCategories: ["Car Loan Repayment", "Car Loan (savings)"], monthlyPayment: 452.82 } },
   ],
   categories: [
     { id: uid(), group: "needs", name: "Rent", planned: 200, fixed: true },
@@ -462,6 +462,16 @@ function migrate(state) {
     }
     const current = ["2026-05", "2026-06"].includes(s.current) ? "2026-07" : s.current;
     s = { ...s, months, current, migratedJulyResetV12: true };
+  }
+
+  // V13: fix linkedCategories name — "Car Loan Savings" → "Car Loan (savings)" to match real category name
+  if (!s.migratedLinkedCatsV13) {
+    const accounts = (s.accounts || []).map(a =>
+      a.id === "acc-car-loan" && a.loanMeta
+        ? { ...a, loanMeta: { ...a.loanMeta, linkedCategories: ["Car Loan Repayment", "Car Loan (savings)"] } }
+        : a
+    );
+    s = { ...s, accounts, migratedLinkedCatsV13: true };
   }
 
   return s;
@@ -962,21 +972,81 @@ function Ratio503020({ calc }) {
 }
 
 /* -------------------------------- PLAN -------------------------------- */
-function Plan({ state, calc, update, groupView, setGroupView, isLocked }) {
-  const [editing, setEditing] = useState(null); // category id
-  const shown = groupView ? GROUPS.filter((g) => g.id === groupView) : GROUPS;
+function EditCategoriesSheet({ group, state, update, onClose }) {
+  const [confirmId, setConfirmId] = useState(null);
+  const [newName, setNewName] = useState("");
+  const cats = state.categories.filter((c) => c.group === group.id);
 
-  const setCat = (id, patch) =>
-    update((s) => ({ ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, ...patch } : c)) }));
-  const addCat = (group) =>
-    update((s) => ({ ...s, categories: [...s.categories, { id: uid(), group, name: "New category", planned: 0, fixed: false }] }));
-  const delCat = (id) =>
+  const addCat = () => {
+    const name = newName.trim() || "New category";
+    update((s) => ({ ...s, categories: [...s.categories, { id: uid(), group: group.id, name, planned: 0, fixed: false }] }));
+    setNewName("");
+  };
+  const delCat = (id) => {
     update((s) => ({
       ...s,
       categories: s.categories.filter((c) => c.id !== id),
       months: Object.fromEntries(Object.entries(s.months).map(([k, m]) =>
-        [k, { ...m, txns: m.txns.filter((t) => t.cat !== id) }])),
+        [k, { ...m, txns: (m.locked ? m.txns : m.txns.filter((t) => t.cat !== id)) }])),
     }));
+    setConfirmId(null);
+  };
+  const movecat = (id, dir) => {
+    update((s) => {
+      const all = [...s.categories];
+      const idx = all.findIndex((c) => c.id === id);
+      const target = idx + dir;
+      if (target < 0 || target >= all.length) return s;
+      // only swap within same group
+      if (all[target].group !== group.id) return s;
+      [all[idx], all[target]] = [all[target], all[idx]];
+      return { ...s, categories: all };
+    });
+  };
+
+  return (
+    <Sheet title={`Edit ${group.label} categories`} onClose={onClose}>
+      <div className="bt-editcats">
+        {cats.map((c, i) => (
+          <div key={c.id} className="bt-editcat-row">
+            <div className="bt-editcat-arrows">
+              <button type="button" className="bt-iconbtn sm" onClick={() => movecat(c.id, -1)} disabled={i === 0} aria-label="Move up"><ChevronUp size={14} /></button>
+              <button type="button" className="bt-iconbtn sm" onClick={() => movecat(c.id, 1)} disabled={i === cats.length - 1} aria-label="Move down"><ChevronDown size={14} /></button>
+            </div>
+            <span className="bt-editcat-name">{c.name}{c.fixed && <span className="bt-tag" style={{ marginLeft: 6 }}>fixed</span>}</span>
+            {confirmId === c.id ? (
+              <div className="bt-editcat-confirm">
+                <span className="bt-muted" style={{ fontSize: 12 }}>Delete?</span>
+                <button type="button" className="bt-del sm" onClick={() => delCat(c.id)}>Yes</button>
+                <button type="button" className="bt-done" onClick={() => setConfirmId(null)}>No</button>
+              </div>
+            ) : (
+              <button type="button" className="bt-del" onClick={() => setConfirmId(c.id)} aria-label="Delete category"><Trash2 size={14} /></button>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="bt-editcat-add">
+        <input
+          className="bt-input"
+          placeholder="New category name…"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && addCat()}
+        />
+        <button type="button" className="bt-savebtn" onClick={addCat}><Plus size={15} /> Add</button>
+      </div>
+    </Sheet>
+  );
+}
+
+function Plan({ state, calc, update, groupView, setGroupView, isLocked }) {
+  const [editing, setEditing] = useState(null); // category id
+  const [editGroup, setEditGroup] = useState(null); // group id for EditCategoriesSheet
+  const shown = groupView ? GROUPS.filter((g) => g.id === groupView) : GROUPS;
+
+  const setCat = (id, patch) =>
+    update((s) => ({ ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, ...patch } : c)) }));
   const togglePaid = (c) =>
     update((s) => {
       const m = s.months[s.current];
@@ -1002,6 +1072,8 @@ function Plan({ state, calc, update, groupView, setGroupView, isLocked }) {
       }
       return { ...s, months: { ...s.months, [s.current]: { ...m, txns } } };
     });
+
+  const editGroupObj = editGroup ? GROUPS.find((g) => g.id === editGroup) : null;
 
   return (
     <div className="bt-stack">
@@ -1032,7 +1104,6 @@ function Plan({ state, calc, update, groupView, setGroupView, isLocked }) {
                       <input className="bt-input bt-input-num bt-mono" type="number" inputMode="decimal" defaultValue={c.planned}
                         onFocus={(e) => e.target.select()}
                         onBlur={(e) => setCat(c.id, { planned: parseFloat(e.target.value) || 0 })} />
-                      {!isLocked && <button type="button" className="bt-del" onClick={() => delCat(c.id)}><Trash2 size={16} /></button>}
                       <button type="button" className="bt-done" onClick={() => setEditing(null)}>Done</button>
                     </div>
                     <button type="button" className={"bt-fixed-toggle" + (c.fixed ? " on" : "")} onClick={() => setCat(c.id, { fixed: !c.fixed })}>
@@ -1082,10 +1153,17 @@ function Plan({ state, calc, update, groupView, setGroupView, isLocked }) {
                 )}
               </div>
             ))}
-            <button className="bt-add-cat" onClick={() => addCat(g.id)}><Plus size={14} /> Add category</button>
+            {!isLocked && (
+              <button className="bt-add-cat" onClick={() => setEditGroup(g.id)}>
+                <SlidersHorizontal size={14} /> Edit categories
+              </button>
+            )}
           </section>
         );
       })}
+      {editGroupObj && (
+        <EditCategoriesSheet group={editGroupObj} state={state} update={update} onClose={() => setEditGroup(null)} />
+      )}
     </div>
   );
 }
@@ -1408,9 +1486,36 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
     update((s) => ({ ...s, categories: s.categories.map((c) => (c.id === catId ? { ...c, planned: v } : c)) }));
 
   const bal = (a) => m.balances[a.id] || 0;
+
+  // Compute loan balance dynamically from linked category transactions across all months,
+  // starting from the initial stored balance (first month where the loan has a non-zero value).
+  const computedLoanBal = (loan) => {
+    if (!loan.loanMeta?.linkedCategories) return bal(loan);
+    const linkedCatIds = new Set(
+      state.categories.filter((c) =>
+        loan.loanMeta.linkedCategories.some((n) =>
+          c.name.toLowerCase() === n.toLowerCase() ||
+          c.name.toLowerCase().includes(n.toLowerCase()) ||
+          n.toLowerCase().includes(c.name.toLowerCase())
+        )
+      ).map((c) => c.id)
+    );
+    const totalPaid = Object.values(state.months)
+      .flatMap((mo) => mo.txns || [])
+      .filter((t) => linkedCatIds.has(t.cat))
+      .reduce((sum, t) => sum + (t.amount || 0), 0);
+    const sortedIds = Object.keys(state.months).sort();
+    let initialBalance = loan.loanMeta.originalAmount;
+    for (const id of sortedIds) {
+      const b = state.months[id].balances?.[loan.id];
+      if (b > 0) { initialBalance = b; break; }
+    }
+    return Math.max(0, initialBalance - totalPaid);
+  };
+
   const totalAssets = state.accounts.filter((a) => a.kind === "asset").reduce((s, a) => s + bal(a), 0);
   const totalOwed = state.accounts.filter((a) => a.kind === "owed").reduce((s, a) => s + bal(a), 0);
-  const totalLoans = loansInNetWorth ? state.accounts.filter((a) => a.kind === "loan").reduce((s, a) => s + bal(a), 0) : 0;
+  const totalLoans = loansInNetWorth ? state.accounts.filter((a) => a.kind === "loan").reduce((s, a) => s + computedLoanBal(a), 0) : 0;
   const netWorth = totalAssets - totalOwed - totalLoans;
   const liquidAssets = state.accounts.filter((a) => a.kind === "asset" && a.liquid).reduce((s, a) => s + bal(a), 0);
   const liquidOwed = state.accounts.filter((a) => a.kind === "owed" && a.liquid).reduce((s, a) => s + bal(a), 0);
@@ -1590,16 +1695,42 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
           <section className="bt-card">
             <div className="bt-card-h">Loans</div>
             {state.accounts.filter((a) => a.kind === "loan").map((loan) => {
-              const curr = m.balances[loan.id] || 0;
               const meta = loan.loanMeta;
               if (!meta) return null;
+
+              // Find linked category IDs — match by exact name or case-insensitive partial overlap
+              const linkedCatIds = new Set(
+                state.categories.filter((c) =>
+                  meta.linkedCategories.some((n) =>
+                    c.name.toLowerCase() === n.toLowerCase() ||
+                    c.name.toLowerCase().includes(n.toLowerCase()) ||
+                    n.toLowerCase().includes(c.name.toLowerCase())
+                  )
+                ).map((c) => c.id)
+              );
+
+              // Sum all payments across every month (both fixed-paid and manually logged)
+              const totalPaid = Object.values(state.months)
+                .flatMap((mo) => mo.txns || [])
+                .filter((t) => linkedCatIds.has(t.cat))
+                .reduce((sum, t) => sum + (t.amount || 0), 0);
+
+              // Initial balance = first month where this loan has a non-zero stored balance
+              const sortedIds = Object.keys(state.months).sort();
+              let initialBalance = meta.originalAmount;
+              for (const id of sortedIds) {
+                const b = state.months[id].balances?.[loan.id];
+                if (b > 0) { initialBalance = b; break; }
+              }
+
+              // Computed remaining balance
+              const curr = Math.max(0, initialBalance - totalPaid);
               const paidOff = meta.originalAmount - curr;
               const pct = meta.originalAmount > 0 ? Math.round((paidOff / meta.originalAmount) * 100) : 0;
               const disbDate = new Date(meta.disbursalDate);
               const endDate = new Date(disbDate.getFullYear(), disbDate.getMonth() + meta.term, disbDate.getDate());
 
-              // amortization: use the real contractual monthly payment if known, otherwise estimate
-              // from the original terms, then solve remaining periods to clear the *current* balance.
+              // Amortization: use real contractual payment if known
               const monthlyRate = meta.interestRate / 100 / 12;
               const estimatedPayment = monthlyRate > 0
                 ? (meta.originalAmount * monthlyRate) / (1 - Math.pow(1 + monthlyRate, -meta.term))
@@ -1615,7 +1746,7 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
                 <div key={loan.id} className="bt-loan-card bt-mono bt-tiny">
                   <div className="bt-loan-header">
                     <span className="bt-text">{loan.name}</span>
-                    <span className={loan.excludeFromNetWorth ? "bt-muted" : ""}>{fmt(curr)}</span>
+                    <span>{fmt(curr)}</span>
                   </div>
                   <div className="bt-loan-bar" style={{ height: "6px", background: "var(--surface2)", borderRadius: "3px", overflow: "hidden", marginTop: "6px" }}>
                     <div style={{ height: "100%", width: `${pct}%`, background: "#7FB3A6" }} />
@@ -1628,6 +1759,11 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
                     <div><span className="bt-muted">Interest left to pay:</span> <span>{fmt(remainingInterest)}</span></div>
                     <div><span className="bt-muted">Payoff date:</span> <span>{endDate.toLocaleDateString("en-IE", { month: "short", year: "2-digit" })}</span></div>
                   </div>
+                  {linkedCatIds.size > 0 && (
+                    <div className="bt-muted bt-tiny" style={{ marginTop: 8 }}>
+                      Auto-tracked from {[...linkedCatIds].map((id) => state.categories.find((c) => c.id === id)?.name).filter(Boolean).join(" + ")}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -2205,6 +2341,16 @@ function Style() {
       .bt-line-nums{display:flex;justify-content:space-between;align-items:center;margin:6px 0 8px;font-size:13px;}
       .bt-add-cat{background:none;border:1px dashed var(--line);color:var(--muted);width:100%;
         padding:9px;border-radius:10px;font-size:12.5px;display:flex;align-items:center;justify-content:center;gap:6px;margin-top:10px;}
+      .bt-editcats{display:flex;flex-direction:column;gap:0;}
+      .bt-editcat-row{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--line);}
+      .bt-editcat-row:last-child{border-bottom:none;}
+      .bt-editcat-arrows{display:flex;flex-direction:column;gap:2px;flex:0 0 auto;}
+      .bt-editcat-name{flex:1;font-size:13.5px;min-width:0;}
+      .bt-editcat-confirm{display:flex;align-items:center;gap:6px;flex:0 0 auto;}
+      .bt-editcat-add{display:flex;gap:8px;margin-top:14px;align-items:center;}
+      .bt-editcat-add .bt-input{flex:1;}
+      .bt-iconbtn.sm{width:28px;height:28px;border-radius:8px;}
+      .bt-del.sm{width:28px;height:28px;font-size:12px;font-weight:600;border-radius:8px;}
 
       .bt-edit{display:flex;flex-direction:column;gap:8px;}
       .bt-edit-row{display:flex;align-items:center;gap:8px;}
