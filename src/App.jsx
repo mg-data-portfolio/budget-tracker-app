@@ -1416,6 +1416,7 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
   const m = state.months[state.current];
   const [snapDate, setSnapDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [showReport, setShowReport] = useState(false);
+  const [loanEdit, setLoanEdit] = useState(null); // { loanId, value } when editing a loan balance
 
   const saveSnapshot = () =>
     update((s) => {
@@ -1698,7 +1699,7 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
               const meta = loan.loanMeta;
               if (!meta) return null;
 
-              // Find linked category IDs — match by exact name or case-insensitive partial overlap
+              // Find linked category IDs
               const linkedCatIds = new Set(
                 state.categories.filter((c) =>
                   meta.linkedCategories.some((n) =>
@@ -1709,7 +1710,7 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
                 ).map((c) => c.id)
               );
 
-              // Sum all payments across every month (both fixed-paid and manually logged)
+              // Sum all payments across every month
               const totalPaid = Object.values(state.months)
                 .flatMap((mo) => mo.txns || [])
                 .filter((t) => linkedCatIds.has(t.cat))
@@ -1718,9 +1719,10 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
               // Initial balance = first month where this loan has a non-zero stored balance
               const sortedIds = Object.keys(state.months).sort();
               let initialBalance = meta.originalAmount;
+              let initialMonthId = null;
               for (const id of sortedIds) {
                 const b = state.months[id].balances?.[loan.id];
-                if (b > 0) { initialBalance = b; break; }
+                if (b > 0) { initialBalance = b; initialMonthId = id; break; }
               }
 
               // Computed remaining balance
@@ -1730,7 +1732,7 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
               const disbDate = new Date(meta.disbursalDate);
               const endDate = new Date(disbDate.getFullYear(), disbDate.getMonth() + meta.term, disbDate.getDate());
 
-              // Amortization: use real contractual payment if known
+              // Amortization
               const monthlyRate = meta.interestRate / 100 / 12;
               const estimatedPayment = monthlyRate > 0
                 ? (meta.originalAmount * monthlyRate) / (1 - Math.pow(1 + monthlyRate, -meta.term))
@@ -1742,11 +1744,58 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
                 remainingInterest = Math.max(0, monthlyPayment * remainingMonths - curr);
               }
 
+              const isEditing = loanEdit?.loanId === loan.id;
+
+              // Confirm: back-calculate a new initialBalance so the computed value equals what the user typed
+              const confirmEdit = () => {
+                const confirmed = parseFloat(loanEdit.value);
+                if (isNaN(confirmed) || confirmed < 0) { setLoanEdit(null); return; }
+                const newInitial = confirmed + totalPaid;
+                const targetMonthId = initialMonthId || sortedIds[0];
+                if (!targetMonthId) { setLoanEdit(null); return; }
+                update((s) => ({
+                  ...s,
+                  months: {
+                    ...s.months,
+                    [targetMonthId]: {
+                      ...s.months[targetMonthId],
+                      balances: { ...s.months[targetMonthId].balances, [loan.id]: newInitial },
+                    },
+                  },
+                }));
+                setLoanEdit(null);
+              };
+
               return (
                 <div key={loan.id} className="bt-loan-card bt-mono bt-tiny">
                   <div className="bt-loan-header">
                     <span className="bt-text">{loan.name}</span>
-                    <span>{fmt(curr)}</span>
+                    {isEditing ? (
+                      <div className="bt-loan-edit">
+                        <span className="bt-muted" style={{ fontSize: 11 }}>€</span>
+                        <input
+                          className="bt-input bt-mono bt-loan-edit-input"
+                          type="number"
+                          inputMode="decimal"
+                          value={loanEdit.value}
+                          onFocus={(e) => e.target.select()}
+                          onChange={(e) => setLoanEdit({ ...loanEdit, value: e.target.value })}
+                          onKeyDown={(e) => { if (e.key === "Enter") confirmEdit(); if (e.key === "Escape") setLoanEdit(null); }}
+                          autoFocus
+                        />
+                        <button type="button" className="bt-savebtn sm" onClick={confirmEdit}>Confirm</button>
+                        <button type="button" className="bt-done" onClick={() => setLoanEdit(null)}>✕</button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="bt-loan-bal-btn"
+                        onClick={() => setLoanEdit({ loanId: loan.id, value: curr.toFixed(2) })}
+                        title="Tap to correct balance"
+                      >
+                        {fmt(curr)} <PencilLine size={11} style={{ opacity: 0.5, marginLeft: 3 }} />
+                      </button>
+                    )}
                   </div>
                   <div className="bt-loan-bar" style={{ height: "6px", background: "var(--surface2)", borderRadius: "3px", overflow: "hidden", marginTop: "6px" }}>
                     <div style={{ height: "100%", width: `${pct}%`, background: "#7FB3A6" }} />
@@ -2429,7 +2478,12 @@ function Style() {
       .bt-kind.asset{color:var(--under);border-color:rgba(79,180,119,.4);}
       .bt-kind.owed{color:var(--over);border-color:rgba(224,105,92,.4);}
       .bt-loan-card{padding:10px;background:var(--surface2);border-radius:10px;margin-bottom:10px;}
-      .bt-loan-header{display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;}
+      .bt-loan-header{display:flex;justify-content:space-between;align-items:center;font-size:13px;margin-bottom:4px;}
+      .bt-loan-bal-btn{background:none;border:none;color:var(--text);font:inherit;font-size:13px;font-family:'IBM Plex Mono',monospace;display:flex;align-items:center;gap:3px;cursor:pointer;padding:0;}
+      .bt-loan-bal-btn:hover{color:var(--accent);}
+      .bt-loan-edit{display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end;}
+      .bt-loan-edit-input{width:110px;padding:5px 8px;font-size:13px;text-align:right;}
+      .bt-savebtn.sm{padding:6px 10px;font-size:12px;}
       .bt-loan-stats{display:flex;flex-direction:column;gap:3px;margin-top:8px;font-size:11px;}
       .bt-loan-stats div{display:flex;justify-content:space-between;}
       .bt-loan-stats .bt-muted{color:var(--muted);}
