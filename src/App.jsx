@@ -183,6 +183,54 @@ function todayMonthId() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
+// Planned amount for a category in a given month. Locked months use the amounts
+// saved when they were locked (so later plan changes don't rewrite history);
+// unlocked months use the live amount.
+function plannedFor(state, monthId, cat) {
+  const m = state.months[monthId];
+  const snap = m && m.locked ? m.plannedSnapshot : null;
+  return snap && snap[cat.id] != null ? snap[cat.id] : cat.planned;
+}
+// A category is archived from a month onward (field set by the future "archive" feature;
+// a missing field means the category is active).
+function isArchivedIn(cat, monthId) {
+  return !!cat.archivedFrom && monthId >= cat.archivedFrom;
+}
+
+// Budget suggestions — one shared implementation for the Insights tab and the PDF report.
+// - Only variable categories, only complete months (next month's payday has passed).
+// - A category's history starts at its first month with spend; it needs 2+ months in that
+//   window with spend above €0 before anything is suggested.
+// - Each month's spend is compared with that month's planned amount (locked-month snapshot).
+// - Categories archived as of the viewed month are skipped.
+// - A suggestion dismissed this calendar month stays hidden until next month.
+function computeSuggestions(state, viewMonthId) {
+  const today = new Date();
+  const isComplete = (id) => computePaydayDate(nextMonthId(id)) <= today;
+  const varSpend = (id, catId) =>
+    (state.months[id].txns || []).filter((t) => t.cat === catId && !t.fixed).reduce((a, t) => a + t.amount, 0);
+  const activeIds = Object.keys(state.months).sort()
+    .filter((id) => isComplete(id) && (state.months[id].txns || []).some((t) => !t.fixed));
+  const dismissed = state.suggestionDismissals || {};
+  const thisMonth = todayMonthId();
+
+  return state.categories
+    .filter((c) => !c.fixed && !isArchivedIn(c, viewMonthId) && dismissed[c.id] !== thisMonth)
+    .map((c) => {
+      const rows = activeIds.map((id) => ({ spent: varSpend(id, c.id), planned: plannedFor(state, id, c) }));
+      const first = rows.findIndex((r) => r.spent > 0);
+      if (first === -1) return null;
+      const win = rows.slice(first);
+      const n = win.length;
+      if (n < 2 || win.filter((r) => r.spent > 0).length < 2) return null;
+      const avg = win.reduce((a, r) => a + r.spent, 0) / n;
+      const avgPlanned = win.reduce((a, r) => a + r.planned, 0) / n;
+      return { c, n, avg, avgPlanned, suggested: Math.round(avg), dev: avg - avgPlanned };
+    })
+    .filter((x) => x && Math.abs(x.dev) > 5 && Math.abs(x.dev) / Math.max(x.avgPlanned, 1) > 0.15)
+    .sort((a, b) => Math.abs(b.dev) - Math.abs(a.dev));
+}
+
 // Per-month metrics across the whole history, with prior-balance chained.
 function buildSeries(state) {
   const ids = Object.keys(state.months).sort();
@@ -474,6 +522,23 @@ function migrate(state) {
     s = { ...s, accounts, migratedLinkedCatsV13: true };
   }
 
+  // V14: budget-suggestion support (additive).
+  //  - plannedSnapshot on every already-locked month = today's planned amounts, so later plan
+  //    changes don't distort suggestions for those months (also saved on every future lock).
+  //  - suggestionDismissals: { [categoryId]: "YYYY-MM" } calendar month a suggestion was dismissed.
+  if (!s.migratedSuggestionsV14) {
+    const months = { ...s.months };
+    for (const id in months) {
+      if (months[id].locked && !months[id].plannedSnapshot) {
+        months[id] = {
+          ...months[id],
+          plannedSnapshot: Object.fromEntries((s.categories || []).map((c) => [c.id, c.planned])),
+        };
+      }
+    }
+    s = { ...s, months, suggestionDismissals: s.suggestionDismissals || {}, migratedSuggestionsV14: true };
+  }
+
   return s;
 }
 
@@ -750,10 +815,15 @@ function AppInner() {
   };
 
   const isLocked = !!(state.months[state.current]?.locked);
-  const toggleLock = () => update((s) => ({
-    ...s,
-    months: { ...s.months, [s.current]: { ...s.months[s.current], locked: !s.months[s.current].locked } },
-  }));
+  // Locking also saves the planned amounts as they stand, so later plan changes
+  // don't distort budget suggestions for this month.
+  const toggleLock = () => update((s) => {
+    const cur = s.months[s.current];
+    const nowLocked = !cur.locked;
+    const next = { ...cur, locked: nowLocked };
+    if (nowLocked) next.plannedSnapshot = Object.fromEntries(s.categories.map((c) => [c.id, c.planned]));
+    return { ...s, months: { ...s.months, [s.current]: next } };
+  });
 
   const thisMonthId = todayMonthId();
   const isCurrentMonth = state.current === thisMonthId;
@@ -1417,6 +1487,7 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
   const [snapDate, setSnapDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [showReport, setShowReport] = useState(false);
   const [loanEdit, setLoanEdit] = useState(null); // { loanId, value } when editing a loan balance
+  const [confirmDismiss, setConfirmDismiss] = useState(null); // category id awaiting dismiss confirmation
 
   const saveSnapshot = () =>
     update((s) => {
@@ -1483,8 +1554,11 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
     }));
   const toggleLiquid = (accId) =>
     update((s) => ({ ...s, accounts: s.accounts.map((a) => (a.id === accId ? { ...a, liquid: !a.liquid } : a)) }));
-  const setPlanned = (catId, v) =>
-    update((s) => ({ ...s, categories: s.categories.map((c) => (c.id === catId ? { ...c, planned: v } : c)) }));
+  // Hide a budget suggestion for the rest of this calendar month; it is reassessed next month.
+  const dismissSuggestion = (catId) => {
+    update((s) => ({ ...s, suggestionDismissals: { ...(s.suggestionDismissals || {}), [catId]: todayMonthId() } }));
+    setConfirmDismiss(null);
+  };
 
   const bal = (a) => m.balances[a.id] || 0;
 
@@ -1599,16 +1673,9 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
   const isMonthComplete = (id) => computePaydayDate(nextMonthId(id)) <= today;
   const completeSeries = series.filter((x) => isMonthComplete(x.id));
 
-  // budget suggestions: variable categories with >=2 *complete* months of logged spend
-  // consistently off plan (so nothing is suggested until you're into the 3rd month).
-  const activeIds = Object.keys(state.months).filter((id) => isMonthComplete(id) && (state.months[id].txns || []).some((t) => !t.fixed));
-  const suggestions = state.categories.filter((c) => !c.fixed).map((c) => {
-    const vals = activeIds.map((id) => (state.months[id].txns || []).filter((t) => t.cat === c.id && !t.fixed).reduce((a, t) => a + t.amount, 0));
-    const n = vals.length;
-    const avg = n ? vals.reduce((a, b) => a + b, 0) / n : 0;
-    return { c, n, avg, suggested: Math.round(avg), dev: avg - c.planned };
-  }).filter((x) => x.n >= 2 && Math.abs(x.dev) > 5 && Math.abs(x.dev) / Math.max(x.c.planned, 1) > 0.15)
-    .sort((a, b) => Math.abs(b.dev) - Math.abs(a.dev));
+  // budget suggestions: shared logic (see computeSuggestions) — own-history window,
+  // per-month planned amounts, archive-aware, dismissals respected.
+  const suggestions = computeSuggestions(state, state.current);
 
   // longer-term rollups
   const sumRange = (arr) => arr.reduce((o, x) => ({ income: o.income + x.income, expenses: o.expenses + x.expenses }), { income: 0, expenses: 0 });
@@ -1926,27 +1993,36 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
         <section className="bt-card">
           <div className="bt-card-h">Budget suggestions</div>
           {suggestions.length === 0 ? (
-            <div className="bt-muted bt-tiny">No changes suggested yet. Once a variable category has 2+ months of logged spend that's consistently off its plan, a tweak will appear here.</div>
-          ) : suggestions.map(({ c, n, avg, suggested, dev }) => {
+            <div className="bt-muted bt-tiny">No changes suggested right now. A variable category needs at least 2 complete months of spend (above €0) that's consistently off its plan before a tweak appears here.</div>
+          ) : suggestions.map(({ c, n, avg, avgPlanned, dev }) => {
             const isOver = dev > 0;
+            const confirming = confirmDismiss === c.id;
             return (
               <div key={c.id} className="bt-sugg">
                 <div className="bt-sugg-mid">
                   <div className="bt-sugg-name">{c.name}</div>
                   <div className="bt-muted bt-tiny bt-mono">
-                    avg {fmt(avg)} / {n} mo · planned {fmt(c.planned)}
+                    avg {fmt(avg)} / {n} mo · planned {fmt(avgPlanned)}
                   </div>
-                  {isOver && (
-                    <div className="bt-sugg-hint bt-tiny">
-                      Reduce spending by {fmt(Math.abs(dev))} to stay on plan
+                  <div className="bt-sugg-hint bt-tiny" style={isOver ? undefined : { color: "var(--under)" }}>
+                    {isOver
+                      ? `Reduce spending by ${fmt(Math.abs(dev))} to stay on plan`
+                      : `${fmt(Math.abs(dev))} consistently unspent — consider lowering the plan and reallocating to savings`}
+                  </div>
+                  {confirming && (
+                    <div className="bt-editcat-confirm" style={{ marginTop: 8 }}>
+                      <span className="bt-muted" style={{ fontSize: 12 }}>Hide until next month?</span>
+                      <button type="button" className="bt-del sm" onClick={() => dismissSuggestion(c.id)}>Yes</button>
+                      <button type="button" className="bt-done" onClick={() => setConfirmDismiss(null)}>No</button>
                     </div>
                   )}
                 </div>
-                {isOver ? (
-                  <span className="bt-sugg-flag is-over">▲ {fmt(avg)}</span>
-                ) : (
-                  <button type="button" className="bt-sugg-apply" onClick={() => setPlanned(c.id, suggested)}>
-                    <span className="is-under">▼ lower to {fmt(suggested)}</span>
+                <span className={"bt-sugg-flag " + (isOver ? "is-over" : "is-under")}>
+                  {isOver ? "▲" : "▼"} {fmt(avg)}
+                </span>
+                {!isLocked && !confirming && (
+                  <button type="button" className="bt-del sm" onClick={() => setConfirmDismiss(c.id)} aria-label="Dismiss suggestion" title="Dismiss for this month">
+                    <X size={12} />
                   </button>
                 )}
               </div>
@@ -2118,15 +2194,8 @@ function reportData(state, monthId) {
   const heldList = snap ? state.accounts.filter((a) => !a.liquid && (snap.balances?.[a.id] ?? 0) !== 0)
     .map((a) => ({ name: a.name, amt: snap.balances[a.id] || 0 })).sort((x, y) => y.amt - x.amt) : [];
 
-  const today = new Date();
-  const isMonthComplete = (id) => computePaydayDate(nextMonthId(id)) <= today;
-  const activeIds = Object.keys(state.months).filter((id) => isMonthComplete(id) && (state.months[id].txns || []).some((t) => !t.fixed));
-  const suggestions = state.categories.filter((c) => !c.fixed).map((c) => {
-    const vals = activeIds.map((id) => (state.months[id].txns || []).filter((t) => t.cat === c.id && !t.fixed).reduce((a, t) => a + t.amount, 0));
-    const n = vals.length, avg = n ? vals.reduce((a, b) => a + b, 0) / n : 0;
-    return { c, n, avg, suggested: Math.round(avg), dev: avg - c.planned };
-  }).filter((x) => x.n >= 2 && Math.abs(x.dev) > 5 && Math.abs(x.dev) / Math.max(x.c.planned, 1) > 0.15)
-    .sort((a, b) => Math.abs(b.dev) - Math.abs(a.dev)).slice(0, 5);
+  // Recommendations use the same shared logic as the Insights tab.
+  const suggestions = computeSuggestions(state, monthId).slice(0, 5);
 
   return { groups, income, spent, remaining: income - spent, base, ideal, fixedCount: fixedCats.length, fixedPaid, snap, heldList, suggestions, snaps };
 }
@@ -2252,7 +2321,7 @@ function ReportSheet({ state, onClose }) {
             <div className="bt-rep-sec">
               <div className="bt-rep-sec-h">Recommendations</div>
               {d.suggestions.length === 0 ? (
-                <div className="bt-rep-line"><span>Not enough history yet — needs 2+ months of logging.</span><span /></div>
+                <div className="bt-rep-line"><span>No recommendations right now — a category needs 2+ months of spend first.</span><span /></div>
               ) : d.suggestions.map(({ c, suggested, dev }) => (
                 <div key={c.id} className="bt-rep-line"><span>{c.name}</span><span>{dev > 0 ? "raise to" : "lower to"} {fmt(suggested)}</span></div>
               ))}
@@ -2522,7 +2591,9 @@ function Style() {
       .bt-sugg-mid{flex:1;min-width:0;}
       .bt-sugg-name{font-size:13.5px;font-weight:500;}
       .bt-sugg-hint{color:var(--over);margin-top:3px;}
-      .bt-sugg-flag{flex:0 0 auto;font-size:12px;font-weight:600;font-family:'IBM Plex Mono',monospace;padding:7px 10px;background:rgba(224,105,92,.1);border:1px solid rgba(224,105,92,.3);border-radius:10px;}
+      .bt-sugg-flag{flex:0 0 auto;font-size:12px;font-weight:600;font-family:'IBM Plex Mono',monospace;padding:7px 10px;border-radius:10px;}
+      .bt-sugg-flag.is-over{background:rgba(224,105,92,.1);border:1px solid rgba(224,105,92,.3);}
+      .bt-sugg-flag.is-under{background:rgba(79,180,119,.1);border:1px solid rgba(79,180,119,.3);}
       .bt-sugg-apply{flex:0 0 auto;background:var(--surface2);border:1px solid var(--line);border-radius:10px;
         padding:9px 12px;font:inherit;font-size:12.5px;font-weight:600;color:var(--text);}
       .bt-lt{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
