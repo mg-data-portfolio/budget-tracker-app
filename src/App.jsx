@@ -2010,19 +2010,20 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
                       : `${fmt(Math.abs(dev))} consistently unspent — consider lowering the plan and reallocating to savings`}
                   </div>
                   {confirming && (
-                    <div className="bt-editcat-confirm" style={{ marginTop: 8 }}>
-                      <span className="bt-muted" style={{ fontSize: 12 }}>Hide until next month?</span>
-                      <button type="button" className="bt-del sm" onClick={() => dismissSuggestion(c.id)}>Yes</button>
-                      <button type="button" className="bt-done" onClick={() => setConfirmDismiss(null)}>No</button>
+                    <div className="bt-sugg-confirm">
+                      <span className="bt-muted bt-tiny">Hide until next month?</span>
+                      <button type="button" className="bt-sugg-yes" onClick={() => dismissSuggestion(c.id)}>Yes</button>
+                      <button type="button" className="bt-sugg-no" onClick={() => setConfirmDismiss(null)}>No</button>
                     </div>
                   )}
                 </div>
                 <span className={"bt-sugg-flag " + (isOver ? "is-over" : "is-under")}>
                   {isOver ? "▲" : "▼"} {fmt(avg)}
                 </span>
-                {!isLocked && !confirming && (
-                  <button type="button" className="bt-del sm" onClick={() => setConfirmDismiss(c.id)} aria-label="Dismiss suggestion" title="Dismiss for this month">
-                    <X size={12} />
+                {!isLocked && (
+                  <button type="button" className="bt-sugg-x" style={confirming ? { visibility: "hidden" } : undefined} disabled={confirming}
+                    onClick={() => setConfirmDismiss(c.id)} aria-label="Dismiss suggestion" title="Dismiss for this month">
+                    <X size={14} />
                   </button>
                 )}
               </div>
@@ -2594,6 +2595,14 @@ function Style() {
       .bt-sugg-flag{flex:0 0 auto;font-size:12px;font-weight:600;font-family:'IBM Plex Mono',monospace;padding:7px 10px;border-radius:10px;}
       .bt-sugg-flag.is-over{background:rgba(224,105,92,.1);border:1px solid rgba(224,105,92,.3);}
       .bt-sugg-flag.is-under{background:rgba(79,180,119,.1);border:1px solid rgba(79,180,119,.3);}
+      .bt-sugg-x{flex:0 0 auto;width:32px;height:32px;padding:0;display:grid;place-items:center;line-height:0;
+        background:var(--surface2);border:1px solid var(--line);color:var(--muted);border-radius:9px;}
+      .bt-sugg-x:hover{color:var(--over);border-color:rgba(224,105,92,.45);}
+      .bt-sugg-confirm{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:10px;}
+      .bt-sugg-yes,.bt-sugg-no{height:34px;min-width:58px;padding:0 16px;border-radius:9px;font:inherit;font-size:13px;font-weight:600;
+        display:inline-flex;align-items:center;justify-content:center;line-height:1;}
+      .bt-sugg-yes{background:rgba(224,105,92,.12);border:1px solid rgba(224,105,92,.45);color:var(--over);}
+      .bt-sugg-no{background:var(--surface2);border:1px solid var(--line);color:var(--text);}
       .bt-sugg-apply{flex:0 0 auto;background:var(--surface2);border:1px solid var(--line);border-radius:10px;
         padding:9px 12px;font:inherit;font-size:12.5px;font-weight:600;color:var(--text);}
       .bt-lt{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
