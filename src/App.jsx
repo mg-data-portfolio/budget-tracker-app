@@ -186,15 +186,27 @@ function todayMonthId() {
 // Planned amount for a category in a given month. Locked months use the amounts
 // saved when they were locked (so later plan changes don't rewrite history);
 // unlocked months use the live amount.
+// A category added after a month was locked has no saved amount, so it counts as €0 there.
+// An archived category has no budget from its archive month on.
 function plannedFor(state, monthId, cat) {
   const m = state.months[monthId];
-  const snap = m && m.locked ? m.plannedSnapshot : null;
-  return snap && snap[cat.id] != null ? snap[cat.id] : cat.planned;
+  if (m && m.locked && m.plannedSnapshot) return m.plannedSnapshot[cat.id] ?? 0;
+  return isArchivedIn(cat, monthId) ? 0 : cat.planned;
 }
-// A category is archived from a month onward (field set by the future "archive" feature;
+// A category is archived from a month onward (`archivedFrom` is a "YYYY-MM" month id;
 // a missing field means the category is active).
 function isArchivedIn(cat, monthId) {
   return !!cat.archivedFrom && monthId >= cat.archivedFrom;
+}
+// Whether a category is shown in a given month. Archived categories drop out from their
+// archive month on, unless real spend is logged there (totals must never lose money).
+// In a locked month, a category created after the lock is hidden unless it has spend.
+function isVisibleIn(state, monthId, cat) {
+  const m = state.months[monthId];
+  const hasTxn = !!m && (m.txns || []).some((t) => t.cat === cat.id);
+  if (isArchivedIn(cat, monthId)) return hasTxn;
+  if (m && m.locked && m.plannedSnapshot && !(cat.id in m.plannedSnapshot)) return hasTxn;
+  return true;
 }
 
 // Budget suggestions — one shared implementation for the Insights tab and the PDF report.
@@ -217,7 +229,8 @@ function computeSuggestions(state, viewMonthId) {
   return state.categories
     .filter((c) => !c.fixed && !isArchivedIn(c, viewMonthId) && dismissed[c.id] !== thisMonth)
     .map((c) => {
-      const rows = activeIds.map((id) => ({ spent: varSpend(id, c.id), planned: plannedFor(state, id, c) }));
+      const rows = activeIds.filter((id) => !isArchivedIn(c, id))
+        .map((id) => ({ spent: varSpend(id, c.id), planned: plannedFor(state, id, c) }));
       const first = rows.findIndex((r) => r.spent > 0);
       if (first === -1) return null;
       const win = rows.slice(first);
@@ -686,23 +699,25 @@ function useMonthCalc(state) {
     const monthIdsSorted = Object.keys(state.months).sort();
     const priorIds = monthIdsSorted.slice(0, monthIdsSorted.indexOf(state.current));
 
-    const cats = state.categories.map((c) => {
+    const cats = state.categories.filter((c) => isVisibleIn(state, state.current, c)).map((c) => {
+      const planned = plannedFor(state, state.current, c);
+      const archived = isArchivedIn(c, state.current);
       const actual = actualByCat[c.id] || 0;
       const paid = month.txns.some((t) => t.cat === c.id && t.fixed);
       let carried = 0;
       if (c.rollover) {
         for (const id of priorIds) {
           const spent = (state.months[id].txns || []).filter((t) => t.cat === c.id).reduce((a, t) => a + t.amount, 0);
-          carried += c.planned - spent;
+          carried += plannedFor(state, id, c) - spent;
         }
         carried = Math.round(carried * 100) / 100;
       }
-      const available = c.planned + carried;
+      const available = planned + carried;
       const diff = available - actual; // +ve = under budget (incl. rolled-over balance)
       // alert level for variable categories: ok | near (>=90%) | over
       const ratio = available > 0 ? actual / available : 0;
       const level = !c.fixed && available > 0 ? (diff < 0 ? "over" : ratio >= 0.9 ? "near" : "ok") : "ok";
-      return { ...c, actual, paid, carried, available, diff, level };
+      return { ...c, planned, archived, actual, paid, carried, available, diff, level };
     });
 
     const groups = GROUPS.map((g) => {
@@ -740,7 +755,7 @@ function useMonthCalc(state) {
     const base = (state.plan.income.salary || 0) + (state.plan.income.other || 0);
     const ideal = { needs: incomeActual * 0.5, wants: incomeActual * 0.3, savings: incomeActual * 0.2 };
 
-    const fixedCats = cats.filter((c) => c.fixed);
+    const fixedCats = cats.filter((c) => c.fixed && !c.archived);
     const alerts = cats.filter((c) => c.level === "near" || c.level === "over");
     const fixed = {
       count: fixedCats.length,
@@ -820,7 +835,7 @@ function AppInner() {
     const cur = s.months[s.current];
     const nowLocked = !cur.locked;
     const next = { ...cur, locked: nowLocked };
-    if (nowLocked) next.plannedSnapshot = Object.fromEntries(s.categories.map((c) => [c.id, c.planned]));
+    if (nowLocked) next.plannedSnapshot = Object.fromEntries(s.categories.map((c) => [c.id, isArchivedIn(c, s.current) ? 0 : c.planned]));
     return { ...s, months: { ...s.months, [s.current]: next } };
   });
 
@@ -1043,8 +1058,14 @@ function Ratio503020({ calc }) {
 /* -------------------------------- PLAN -------------------------------- */
 function EditCategoriesSheet({ group, state, update, onClose }) {
   const [confirmId, setConfirmId] = useState(null);
+  const [archiveId, setArchiveId] = useState(null);
   const [newName, setNewName] = useState("");
-  const cats = state.categories.filter((c) => c.group === group.id);
+  const cur = state.current;
+  const curLabel = monthMeta(cur).label;
+  const locked = !!state.months[cur]?.locked;
+  const inGroup = state.categories.filter((c) => c.group === group.id);
+  const cats = inGroup.filter((c) => !isArchivedIn(c, cur));        // active this month
+  const archivedCats = inGroup.filter((c) => isArchivedIn(c, cur)); // archived this month
 
   const addCat = () => {
     const name = newName.trim() || "New category";
@@ -1060,15 +1081,35 @@ function EditCategoriesSheet({ group, state, update, onClose }) {
     }));
     setConfirmId(null);
   };
+  // Archive from the month being viewed: hidden from then on, earlier months unchanged.
+  const archiveCat = (id) => {
+    if (locked) return;
+    update((s) => ({ ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, archivedFrom: s.current } : c)) }));
+    setArchiveId(null);
+  };
+  // Restore: make the category active again in every month.
+  const restoreCat = (id) => {
+    if (locked) return;
+    update((s) => ({
+      ...s,
+      categories: s.categories.map((c) => {
+        if (c.id !== id) return c;
+        const { archivedFrom, ...rest } = c;
+        return rest;
+      }),
+    }));
+  };
   const movecat = (id, dir) => {
     update((s) => {
+      // swap with the neighbouring category the user can actually see (same group, not archived)
+      const visible = s.categories.filter((c) => c.group === group.id && !isArchivedIn(c, s.current));
+      const vi = visible.findIndex((c) => c.id === id);
+      const neighbour = visible[vi + dir];
+      if (vi === -1 || !neighbour) return s;
       const all = [...s.categories];
-      const idx = all.findIndex((c) => c.id === id);
-      const target = idx + dir;
-      if (target < 0 || target >= all.length) return s;
-      // only swap within same group
-      if (all[target].group !== group.id) return s;
-      [all[idx], all[target]] = [all[target], all[idx]];
+      const a = all.findIndex((c) => c.id === id);
+      const b = all.findIndex((c) => c.id === neighbour.id);
+      [all[a], all[b]] = [all[b], all[a]];
       return { ...s, categories: all };
     });
   };
@@ -1082,19 +1123,46 @@ function EditCategoriesSheet({ group, state, update, onClose }) {
               <button type="button" className="bt-iconbtn sm" onClick={() => movecat(c.id, -1)} disabled={i === 0} aria-label="Move up"><ChevronUp size={14} /></button>
               <button type="button" className="bt-iconbtn sm" onClick={() => movecat(c.id, 1)} disabled={i === cats.length - 1} aria-label="Move down"><ChevronDown size={14} /></button>
             </div>
-            <span className="bt-editcat-name">{c.name}{c.fixed && <span className="bt-tag" style={{ marginLeft: 6 }}>fixed</span>}</span>
+            <span className="bt-editcat-name">
+              {c.name}{c.fixed && <span className="bt-tag" style={{ marginLeft: 6 }}>fixed</span>}
+              {c.archivedFrom && <span className="bt-tag" style={{ marginLeft: 6 }}>archives {monthMeta(c.archivedFrom).label}</span>}
+            </span>
             {confirmId === c.id ? (
               <div className="bt-editcat-confirm">
                 <span className="bt-muted" style={{ fontSize: 12 }}>Delete?</span>
                 <button type="button" className="bt-del sm" onClick={() => delCat(c.id)}>Yes</button>
                 <button type="button" className="bt-done" onClick={() => setConfirmId(null)}>No</button>
               </div>
+            ) : archiveId === c.id ? (
+              <div className="bt-editcat-confirm">
+                <span className="bt-muted" style={{ fontSize: 12 }}>Archive from {curLabel}?</span>
+                <button type="button" className="bt-done" onClick={() => archiveCat(c.id)}>Yes</button>
+                <button type="button" className="bt-done" onClick={() => setArchiveId(null)}>No</button>
+              </div>
             ) : (
-              <button type="button" className="bt-del" onClick={() => setConfirmId(c.id)} aria-label="Delete category"><Trash2 size={14} /></button>
+              <div className="bt-editcat-confirm">
+                {!locked && <button type="button" className="bt-done" onClick={() => setArchiveId(c.id)}>Archive</button>}
+                <button type="button" className="bt-del" onClick={() => setConfirmId(c.id)} aria-label="Delete category"><Trash2 size={14} /></button>
+              </div>
             )}
           </div>
         ))}
       </div>
+      {archivedCats.length > 0 && (
+        <>
+          <div className="bt-inc-section-h" style={{ marginTop: 14 }}>Archived</div>
+          <div className="bt-editcats">
+            {archivedCats.map((c) => (
+              <div key={c.id} className="bt-editcat-row">
+                <span className="bt-editcat-name bt-muted">
+                  {c.name}<span className="bt-tag" style={{ marginLeft: 6 }}>since {monthMeta(c.archivedFrom).label}</span>
+                </span>
+                {!locked && <button type="button" className="bt-done" onClick={() => restoreCat(c.id)}>Restore</button>}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
       <div className="bt-editcat-add">
         <input
           className="bt-input"
@@ -1116,7 +1184,8 @@ function Plan({ state, calc, update, groupView, setGroupView, isLocked }) {
 
   const setCat = (id, patch) =>
     update((s) => ({ ...s, categories: s.categories.map((c) => (c.id === id ? { ...c, ...patch } : c)) }));
-  const togglePaid = (c) =>
+  const togglePaid = (c) => {
+    if (isLocked || c.archived) return;
     update((s) => {
       const m = s.months[s.current];
       const has = m.txns.some((t) => t.cat === c.id && t.fixed);
@@ -1125,22 +1194,27 @@ function Plan({ state, calc, update, groupView, setGroupView, isLocked }) {
         : [...m.txns, { id: uid(), cat: c.id, amount: c.planned, date: new Date().toISOString().slice(0, 10), fixed: true, note: "Fixed cost" }];
       return { ...s, months: { ...s.months, [s.current]: { ...m, txns } } };
     });
+  };
   const allFixedPaid = calc.fixed.count > 0 && calc.fixed.paidCount === calc.fixed.count;
-  const toggleAllFixed = () =>
+  const toggleAllFixed = () => {
+    if (isLocked) return;
     update((s) => {
       const m = s.months[s.current];
       const today = new Date().toISOString().slice(0, 10);
+      // archived categories are left alone (not paid, not cleared)
+      const activeIds = new Set(s.categories.filter((c) => !isArchivedIn(c, s.current)).map((c) => c.id));
       let txns;
       if (allFixedPaid) {
-        txns = m.txns.filter((t) => !t.fixed);
+        txns = m.txns.filter((t) => !(t.fixed && activeIds.has(t.cat)));
       } else {
         const paidIds = new Set(m.txns.filter((t) => t.fixed).map((t) => t.cat));
-        const add = s.categories.filter((c) => c.fixed && !paidIds.has(c.id))
+        const add = s.categories.filter((c) => c.fixed && activeIds.has(c.id) && !paidIds.has(c.id))
           .map((c) => ({ id: uid(), cat: c.id, amount: c.planned, date: today, fixed: true, note: "Fixed cost" }));
         txns = [...m.txns, ...add];
       }
       return { ...s, months: { ...s.months, [s.current]: { ...m, txns } } };
     });
+  };
 
   const editGroupObj = editGroup ? GROUPS.find((g) => g.id === editGroup) : null;
 
@@ -1150,7 +1224,7 @@ function Plan({ state, calc, update, groupView, setGroupView, isLocked }) {
         <button className="bt-back" onClick={() => setGroupView(null)}><ChevronLeft size={16} /> All groups</button>
       )}
       {calc.fixed.count > 0 && (
-        <button type="button" className={"bt-payall" + (allFixedPaid ? " on" : "")} onClick={toggleAllFixed}>
+        <button type="button" className={"bt-payall" + (allFixedPaid ? " on" : "")} onClick={toggleAllFixed} disabled={isLocked}>
           <span><Check size={15} strokeWidth={3} /> {allFixedPaid ? "All fixed bills paid" : `Pay all fixed bills (${calc.fixed.count - calc.fixed.paidCount} left · ${fmt(calc.fixed.remaining)})`}</span>
           <span className="bt-mono bt-muted">{allFixedPaid ? "tap to clear" : "tap to pay"}</span>
         </button>
@@ -1191,16 +1265,17 @@ function Plan({ state, calc, update, groupView, setGroupView, isLocked }) {
                   </div>
                 ) : (
                   <div className="bt-line-row">
-                    {c.fixed && (
-                      <button type="button" className={"bt-tick" + (c.paid ? " on" : "")} onClick={() => togglePaid(c)}
+                    {c.fixed && !c.archived && (
+                      <button type="button" className={"bt-tick" + (c.paid ? " on" : "")} onClick={() => togglePaid(c)} disabled={isLocked}
                         aria-label={c.paid ? "Mark unpaid" : "Mark paid"} aria-pressed={c.paid}>
                         <Check size={15} strokeWidth={3} />
                       </button>
                     )}
-                    <button type="button" className="bt-line-main" onClick={() => { if (!isLocked) setEditing(c.id); }}>
+                    <button type="button" className="bt-line-main" onClick={() => { if (!isLocked && !c.archived) setEditing(c.id); }}>
                       <div className={"bt-line-name" + (c.paid ? " paid" : "")}>
                         {c.name}
-                        {c.fixed && <span className="bt-tag">{c.paid ? "paid" : "fixed"}</span>}
+                        {c.archived && <span className="bt-tag">archived</span>}
+                        {c.fixed && !c.archived && <span className="bt-tag">{c.paid ? "paid" : "fixed"}</span>}
                         {c.rollover && <span className="bt-tag">rollover</span>}
                         {c.level === "near" && <span className="bt-tag near">near</span>}
                         {c.level === "over" && <span className="bt-tag over">over</span>}
@@ -1293,7 +1368,7 @@ function Activity({ state, calc, update, isLocked }) {
           <option value="income">Income only</option>
           {GROUPS.map((g) => (
             <optgroup key={g.id} label={g.label}>
-              {state.categories.filter((c) => c.group === g.id).map((c) => (<option key={c.id} value={c.id}>{c.name}</option>))}
+              {state.categories.filter((c) => c.group === g.id && isVisibleIn(state, state.current, c)).map((c) => (<option key={c.id} value={c.id}>{c.name}</option>))}
             </optgroup>
           ))}
         </select>
@@ -1345,7 +1420,8 @@ function AddEntry({ state, update, onClose }) {
   const today = new Date().toISOString().slice(0, 10);
   const [mode, setMode] = useState("expense");
   const [amount, setAmount] = useState("");
-  const [cat, setCat] = useState(state.categories[0]?.id);
+  const addable = state.categories.filter((c) => !isArchivedIn(c, state.current));
+  const [cat, setCat] = useState(addable[0]?.id);
   const [source, setSource] = useState("");
   const [note, setNote] = useState("");
   const [date, setDate] = useState(today);
@@ -1386,7 +1462,7 @@ function AddEntry({ state, update, onClose }) {
           <select className="bt-input bt-select" value={cat} onChange={(e) => setCat(e.target.value)}>
             {GROUPS.map((g) => (
               <optgroup key={g.id} label={g.label}>
-                {state.categories.filter((c) => c.group === g.id).map((c) => (
+                {addable.filter((c) => c.group === g.id).map((c) => (
                   <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
               </optgroup>
@@ -2010,7 +2086,10 @@ function reportData(state, monthId) {
   const month = state.months[monthId] || { txns: [], incomeTxns: [], income: {}, balances: {} };
   const actualByCat = {};
   (month.txns || []).forEach((t) => { actualByCat[t.cat] = (actualByCat[t.cat] || 0) + t.amount; });
-  const cats = state.categories.map((c) => ({ ...c, actual: actualByCat[c.id] || 0, diff: c.planned - (actualByCat[c.id] || 0) }));
+  const cats = state.categories.filter((c) => isVisibleIn(state, monthId, c)).map((c) => {
+    const planned = plannedFor(state, monthId, c);
+    return { ...c, planned, archived: isArchivedIn(c, monthId), actual: actualByCat[c.id] || 0, diff: planned - (actualByCat[c.id] || 0) };
+  });
   const groups = GROUPS.map((g) => {
     const list = cats.filter((c) => c.group === g.id);
     const planned = list.reduce((s, c) => s + c.planned, 0);
@@ -2022,7 +2101,7 @@ function reportData(state, monthId) {
   const spent = groups.reduce((s, g) => s + g.actual, 0);
   const base = (state.plan.income.salary || 0) + (state.plan.income.other || 0);
   const ideal = { needs: income * 0.5, wants: income * 0.3, savings: income * 0.2 };
-  const fixedCats = cats.filter((c) => c.fixed);
+  const fixedCats = cats.filter((c) => c.fixed && !c.archived);
   const fixedPaid = fixedCats.filter((c) => (month.txns || []).some((t) => t.cat === c.id && t.fixed)).length;
 
   const snaps = (state.wealthSnapshots || []).slice().sort((a, b) => a.date.localeCompare(b.date));
@@ -2296,7 +2375,7 @@ function Style() {
       .bt-add-cat{background:none;border:1px dashed var(--line);color:var(--muted);width:100%;
         padding:9px;border-radius:10px;font-size:12.5px;display:flex;align-items:center;justify-content:center;gap:6px;margin-top:10px;}
       .bt-editcats{display:flex;flex-direction:column;gap:0;}
-      .bt-editcat-row{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--line);}
+      .bt-editcat-row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 0;border-bottom:1px solid var(--line);}
       .bt-editcat-row:last-child{border-bottom:none;}
       .bt-editcat-arrows{display:flex;flex-direction:column;gap:2px;flex:0 0 auto;}
       .bt-editcat-name{flex:1;font-size:13.5px;min-width:0;}
@@ -2412,6 +2491,7 @@ function Style() {
         border-radius:13px;padding:13px 15px;font:inherit;font-size:13px;font-weight:600;}
       .bt-payall span:first-child{display:flex;align-items:center;gap:8px;}
       .bt-payall.on{background:rgba(79,180,119,.12);border-color:rgba(79,180,119,.4);color:var(--under);}
+      .bt-payall:disabled,.bt-tick:disabled{opacity:.5;cursor:default;}
       .bt-sugg{display:flex;align-items:center;gap:10px;padding:11px 0;border-top:1px solid var(--line);}
       .bt-sugg:first-of-type{border-top:none;}
       .bt-sugg-mid{flex:1;min-width:0;}
