@@ -769,7 +769,6 @@ function AppInner() {
   const [adding, setAdding] = useState(false);
   const [editIncome, setEditIncome] = useState(false);
   const [editSettings, setEditSettings] = useState(false);
-  const [loansInNetWorth, setLoansInNetWorth] = useState(true); // include loans in net worth calculation
   const theme = state?.theme === "light" ? "light" : "dark";
   const rootClass = "bt-root" + (theme === "light" ? " light" : "");
 
@@ -891,7 +890,7 @@ function AppInner() {
           <Plan state={state} calc={calc} update={update} groupView={groupView} setGroupView={setGroupView} isLocked={isLocked} />
         )}
         {tab === "insights" && (
-          <Insights state={state} calc={calc} update={update} theme={theme} loansInNetWorth={loansInNetWorth} setLoansInNetWorth={setLoansInNetWorth} isLocked={isLocked} />
+          <Insights state={state} calc={calc} update={update} theme={theme} isLocked={isLocked} />
         )}
       </main>
 
@@ -1482,11 +1481,10 @@ function IncomeSheet({ state, calc, update, onClose }) {
 }
 
 /* ------------------------------ INSIGHTS ------------------------------ */
-function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWorth, isLocked }) {
+function Insights({ state, calc, update, theme, isLocked }) {
   const m = state.months[state.current];
   const [snapDate, setSnapDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [showReport, setShowReport] = useState(false);
-  const [loanEdit, setLoanEdit] = useState(null); // { loanId, value } when editing a loan balance
   const [confirmDismiss, setConfirmDismiss] = useState(null); // category id awaiting dismiss confirmation
 
   const saveSnapshot = () =>
@@ -1562,36 +1560,9 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
 
   const bal = (a) => m.balances[a.id] || 0;
 
-  // Compute loan balance dynamically from linked category transactions across all months,
-  // starting from the initial stored balance (first month where the loan has a non-zero value).
-  const computedLoanBal = (loan) => {
-    if (!loan.loanMeta?.linkedCategories) return bal(loan);
-    const linkedCatIds = new Set(
-      state.categories.filter((c) =>
-        loan.loanMeta.linkedCategories.some((n) =>
-          c.name.toLowerCase() === n.toLowerCase() ||
-          c.name.toLowerCase().includes(n.toLowerCase()) ||
-          n.toLowerCase().includes(c.name.toLowerCase())
-        )
-      ).map((c) => c.id)
-    );
-    const totalPaid = Object.values(state.months)
-      .flatMap((mo) => mo.txns || [])
-      .filter((t) => linkedCatIds.has(t.cat))
-      .reduce((sum, t) => sum + (t.amount || 0), 0);
-    const sortedIds = Object.keys(state.months).sort();
-    let initialBalance = loan.loanMeta.originalAmount;
-    for (const id of sortedIds) {
-      const b = state.months[id].balances?.[loan.id];
-      if (b > 0) { initialBalance = b; break; }
-    }
-    return Math.max(0, initialBalance - totalPaid);
-  };
-
   const totalAssets = state.accounts.filter((a) => a.kind === "asset").reduce((s, a) => s + bal(a), 0);
   const totalOwed = state.accounts.filter((a) => a.kind === "owed").reduce((s, a) => s + bal(a), 0);
-  const totalLoans = loansInNetWorth ? state.accounts.filter((a) => a.kind === "loan").reduce((s, a) => s + computedLoanBal(a), 0) : 0;
-  const netWorth = totalAssets - totalOwed - totalLoans;
+  const netWorth = totalAssets - totalOwed;
   const liquidAssets = state.accounts.filter((a) => a.kind === "asset" && a.liquid).reduce((s, a) => s + bal(a), 0);
   const liquidOwed = state.accounts.filter((a) => a.kind === "owed" && a.liquid).reduce((s, a) => s + bal(a), 0);
   const netCash = liquidAssets - liquidOwed;
@@ -1736,12 +1707,6 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
             <div><span className="bt-muted">Net worth</span><strong className={netWorth < 0 ? "is-over" : ""}>{fmt(netWorth)}</strong></div>
           </div>
           <div className="bt-muted bt-tiny" style={{ marginTop: 8 }}>Net worth combines cash, held assets and anything owed.</div>
-          {state.accounts.some((a) => a.kind === "loan") && (
-            <label className="bt-loan-toggle" style={{ marginTop: 10, display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", cursor: "pointer" }}>
-              <input type="checkbox" checked={loansInNetWorth} onChange={(e) => setLoansInNetWorth(e.target.checked)} style={{ cursor: "pointer" }} />
-              <span>Include loan in net worth calculation</span>
-            </label>
-          )}
           {snapStale && (
             <div className="bt-recon-flag warn" style={{ marginTop: 10 }}>
               {lastSnap ? `Last snapshot was ${new Date(lastSnap.date).toLocaleDateString("en-IE", { day: "2-digit", month: "short" })} — update your balances and save a fresh one.` : "Save your first snapshot to start tracking wealth over time."}
@@ -1756,136 +1721,6 @@ function Insights({ state, calc, update, theme, loansInNetWorth, setLoansInNetWo
           <div className="bt-muted bt-tiny" style={{ marginTop: 6 }}>Records {fmt(heldTotal)} held assets as a dated point on the trend below.</div>
         </section>
       </div>
-
-      {state.accounts.filter((a) => a.kind === "loan").length > 0 && (
-        <div className="bt-insrow">
-          {/* LOANS */}
-          <section className="bt-card">
-            <div className="bt-card-h">Loans</div>
-            {state.accounts.filter((a) => a.kind === "loan").map((loan) => {
-              const meta = loan.loanMeta;
-              if (!meta) return null;
-
-              // Find linked category IDs
-              const linkedCatIds = new Set(
-                state.categories.filter((c) =>
-                  meta.linkedCategories.some((n) =>
-                    c.name.toLowerCase() === n.toLowerCase() ||
-                    c.name.toLowerCase().includes(n.toLowerCase()) ||
-                    n.toLowerCase().includes(c.name.toLowerCase())
-                  )
-                ).map((c) => c.id)
-              );
-
-              // Sum all payments across every month
-              const totalPaid = Object.values(state.months)
-                .flatMap((mo) => mo.txns || [])
-                .filter((t) => linkedCatIds.has(t.cat))
-                .reduce((sum, t) => sum + (t.amount || 0), 0);
-
-              // Initial balance = first month where this loan has a non-zero stored balance
-              const sortedIds = Object.keys(state.months).sort();
-              let initialBalance = meta.originalAmount;
-              let initialMonthId = null;
-              for (const id of sortedIds) {
-                const b = state.months[id].balances?.[loan.id];
-                if (b > 0) { initialBalance = b; initialMonthId = id; break; }
-              }
-
-              // Computed remaining balance
-              const curr = Math.max(0, initialBalance - totalPaid);
-              const paidOff = meta.originalAmount - curr;
-              const pct = meta.originalAmount > 0 ? Math.round((paidOff / meta.originalAmount) * 100) : 0;
-              const disbDate = new Date(meta.disbursalDate);
-              const endDate = new Date(disbDate.getFullYear(), disbDate.getMonth() + meta.term, disbDate.getDate());
-
-              // Amortization
-              const monthlyRate = meta.interestRate / 100 / 12;
-              const estimatedPayment = monthlyRate > 0
-                ? (meta.originalAmount * monthlyRate) / (1 - Math.pow(1 + monthlyRate, -meta.term))
-                : meta.originalAmount / meta.term;
-              const monthlyPayment = meta.monthlyPayment || estimatedPayment;
-              let remainingInterest = 0;
-              if (monthlyRate > 0 && curr > 0 && monthlyPayment > curr * monthlyRate) {
-                const remainingMonths = -Math.log(1 - (curr * monthlyRate) / monthlyPayment) / Math.log(1 + monthlyRate);
-                remainingInterest = Math.max(0, monthlyPayment * remainingMonths - curr);
-              }
-
-              const isEditing = loanEdit?.loanId === loan.id;
-
-              // Confirm: back-calculate a new initialBalance so the computed value equals what the user typed
-              const confirmEdit = () => {
-                const confirmed = parseFloat(loanEdit.value);
-                if (isNaN(confirmed) || confirmed < 0) { setLoanEdit(null); return; }
-                const newInitial = confirmed + totalPaid;
-                const targetMonthId = initialMonthId || sortedIds[0];
-                if (!targetMonthId) { setLoanEdit(null); return; }
-                update((s) => ({
-                  ...s,
-                  months: {
-                    ...s.months,
-                    [targetMonthId]: {
-                      ...s.months[targetMonthId],
-                      balances: { ...s.months[targetMonthId].balances, [loan.id]: newInitial },
-                    },
-                  },
-                }));
-                setLoanEdit(null);
-              };
-
-              return (
-                <div key={loan.id} className="bt-loan-card bt-mono bt-tiny">
-                  <div className="bt-loan-header">
-                    <span className="bt-text">{loan.name}</span>
-                    {isEditing ? (
-                      <div className="bt-loan-edit">
-                        <span className="bt-muted" style={{ fontSize: 11 }}>€</span>
-                        <input
-                          className="bt-input bt-mono bt-loan-edit-input"
-                          type="number"
-                          inputMode="decimal"
-                          value={loanEdit.value}
-                          onFocus={(e) => e.target.select()}
-                          onChange={(e) => setLoanEdit({ ...loanEdit, value: e.target.value })}
-                          onKeyDown={(e) => { if (e.key === "Enter") confirmEdit(); if (e.key === "Escape") setLoanEdit(null); }}
-                          autoFocus
-                        />
-                        <button type="button" className="bt-savebtn sm" onClick={confirmEdit}>Confirm</button>
-                        <button type="button" className="bt-done" onClick={() => setLoanEdit(null)}>✕</button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        className="bt-loan-bal-btn"
-                        onClick={() => setLoanEdit({ loanId: loan.id, value: curr.toFixed(2) })}
-                        title="Tap to correct balance"
-                      >
-                        {fmt(curr)} <PencilLine size={11} style={{ opacity: 0.5, marginLeft: 3 }} />
-                      </button>
-                    )}
-                  </div>
-                  <div className="bt-loan-bar" style={{ height: "6px", background: "var(--surface2)", borderRadius: "3px", overflow: "hidden", marginTop: "6px" }}>
-                    <div style={{ height: "100%", width: `${pct}%`, background: "#7FB3A6" }} />
-                  </div>
-                  <div className="bt-loan-stats">
-                    <div><span className="bt-muted">Paid off:</span> <span>{fmt(paidOff)} ({pct}%)</span></div>
-                    <div><span className="bt-muted">Original:</span> <span>{fmt(meta.originalAmount)}</span></div>
-                    <div><span className="bt-muted">Rate:</span> <span>{meta.interestRate}%</span></div>
-                    <div><span className="bt-muted">Monthly payment:</span> <span>{fmt(monthlyPayment)}</span></div>
-                    <div><span className="bt-muted">Interest left to pay:</span> <span>{fmt(remainingInterest)}</span></div>
-                    <div><span className="bt-muted">Payoff date:</span> <span>{endDate.toLocaleDateString("en-IE", { month: "short", year: "2-digit" })}</span></div>
-                  </div>
-                  {linkedCatIds.size > 0 && (
-                    <div className="bt-muted bt-tiny" style={{ marginTop: 8 }}>
-                      Auto-tracked from {[...linkedCatIds].map((id) => state.categories.find((c) => c.id === id)?.name).filter(Boolean).join(" + ")}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </section>
-        </div>
-      )}
 
       <div className="bt-insrow">
         {/* HELD ASSETS OVER TIME */}
@@ -2547,16 +2382,6 @@ function Style() {
         font-size:16px;font-weight:600;line-height:1;flex:0 0 auto;}
       .bt-kind.asset{color:var(--under);border-color:rgba(79,180,119,.4);}
       .bt-kind.owed{color:var(--over);border-color:rgba(224,105,92,.4);}
-      .bt-loan-card{padding:10px;background:var(--surface2);border-radius:10px;margin-bottom:10px;}
-      .bt-loan-header{display:flex;justify-content:space-between;align-items:center;font-size:13px;margin-bottom:4px;}
-      .bt-loan-bal-btn{background:none;border:none;color:var(--text);font:inherit;font-size:13px;font-family:'IBM Plex Mono',monospace;display:flex;align-items:center;gap:3px;cursor:pointer;padding:0;}
-      .bt-loan-bal-btn:hover{color:var(--accent);}
-      .bt-loan-edit{display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end;}
-      .bt-loan-edit-input{width:110px;padding:5px 8px;font-size:13px;text-align:right;}
-      .bt-savebtn.sm{padding:6px 10px;font-size:12px;}
-      .bt-loan-stats{display:flex;flex-direction:column;gap:3px;margin-top:8px;font-size:11px;}
-      .bt-loan-stats div{display:flex;justify-content:space-between;}
-      .bt-loan-stats .bt-muted{color:var(--muted);}
       .bt-acc-name{flex:1;min-width:0;background:none;border:none;color:var(--text);font:inherit;font-size:13.5px;padding:4px 2px;border-bottom:1px solid transparent;}
       .bt-acc-name:focus{outline:none;border-bottom-color:var(--accent);}
       .bt-split{width:28px;height:28px;border-radius:8px;border:1px solid var(--line);background:var(--surface2);color:var(--muted);flex:0 0 auto;display:flex;align-items:center;justify-content:center;}
