@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Legend,
+  Tooltip, ResponsiveContainer, Legend, ReferenceLine,
 } from "recharts";
 
 /* ------------------------------------------------------------------ *
@@ -558,12 +558,13 @@ function migrate(state) {
     s = { ...s, months, suggestionDismissals: s.suggestionDismissals || {}, migratedSuggestionsV14: true };
   }
 
-  // V15: savings goals (additive). Holiday Fund goal: €15,000 by the end of Sept 2027.
-  // Only adds the field when it is missing; never overwrites a target the user has edited.
+  // V15: savings goals (additive). Holiday Fund goal: €15,000 by the end of Oct 2027 (target and
+  // deadline are editable in the app). Only adds the field when it is missing; never overwrites
+  // a target or deadline the user has edited.
   if (!s.migratedGoalsV15) {
     s = {
       ...s,
-      goals: s.goals || { holiday: { target: 15000, deadline: "2027-09", accountId: "acc-holiday" } },
+      goals: s.goals || { holiday: { target: 15000, deadline: "2027-10", accountId: "acc-holiday" } },
       migratedGoalsV15: true,
     };
   }
@@ -1580,6 +1581,7 @@ function Insights({ state, calc, update, theme, isLocked }) {
   const [confirmDismiss, setConfirmDismiss] = useState(null); // category id awaiting dismiss confirmation
   const [editGoal, setEditGoal] = useState(false);
   const [goalInput, setGoalInput] = useState("");
+  const [goalDeadlineInput, setGoalDeadlineInput] = useState("");
 
   const saveSnapshot = () =>
     update((s) => {
@@ -1756,11 +1758,41 @@ function Insights({ state, calc, update, theme, isLocked }) {
   const goalNeeds = goalMonthsLeft > 0 ? Math.ceil(goalRemaining / goalMonthsLeft) : null;
   const goalPlanned = goalCat ? plannedFor(state, state.current, goalCat) : null;
   const goalGap = goalNeeds != null && goalPlanned != null ? goalPlanned - goalNeeds : null; // +ve = covered, −ve = short
+  // Chart rows, one per budget month. "actual" = the Holiday Fund balance saved in that month's Wealth
+  // card (months up to the viewed one). "projected" = the balance plus the planned monthly contribution
+  // for each month still to come, starting with the viewed month (same counting as "Months left").
+  const goalProjMonths = Math.min(goalMonthsLeft, 120);
+  const goalProjEnd = goalPlanned != null && goalProjMonths > 0 ? goalBal + goalPlanned * goalProjMonths : null;
+  const goalRows = (() => {
+    if (!goal || !goalAcc) return [];
+    const rows = new Map();
+    Object.keys(state.months).sort().forEach((id) => {
+      if (id > state.current) return;
+      const v = state.months[id].balances?.[goalAcc.id];
+      // every month stays on the axis; a month with no saved balance just has no "actual" point
+      rows.set(id, typeof v === "number" ? { id, actual: v } : { id });
+    });
+    if (goalProjEnd != null) {
+      // The dashed line starts at this month's balance (k = 0) and adds one planned contribution
+      // per payday still to come, so it ends one column later than "Months left" suggests: the last
+      // payday before the deadline funds the following budget month.
+      let id = state.current;
+      for (let k = 0; k <= goalProjMonths; k++) {
+        rows.set(id, { ...(rows.get(id) || { id }), projected: Math.round((goalBal + goalPlanned * k) * 100) / 100 });
+        id = nextMonthId(id);
+      }
+    }
+    return [...rows.values()].sort((a, b) => a.id.localeCompare(b.id)).map((r) => {
+      const [y, mo] = r.id.split("-").map(Number);
+      return { ...r, label: new Date(y, mo - 1, 1).toLocaleDateString("en-IE", { month: "short", year: "2-digit" }) };
+    });
+  })();
   const saveGoal = () => {
     if (isLocked) return;
     const t = parseFloat(goalInput);
     if (!(t > 0)) return;
-    update((s) => ({ ...s, goals: { ...(s.goals || {}), holiday: { ...(s.goals?.holiday || {}), target: t } } }));
+    const dl = /^\d{4}-(0[1-9]|1[0-2])$/.test(goalDeadlineInput) ? goalDeadlineInput : goal.deadline;
+    update((s) => ({ ...s, goals: { ...(s.goals || {}), holiday: { ...(s.goals?.holiday || {}), target: t, deadline: dl } } }));
     setEditGoal(false);
   };
 
@@ -1886,6 +1918,32 @@ function Insights({ state, calc, update, theme, isLocked }) {
             <div className="bt-track">
               <div className="bt-track-fill" style={{ width: `${goalPct * 100}%`, background: "var(--under)" }} />
             </div>
+            {goalRows.length > 1 && (
+              <>
+                <div className="bt-chart">
+                  <ResponsiveContainer width="100%" height={200}>
+                    <LineChart data={goalRows}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={cGrid} vertical={false} />
+                      <XAxis dataKey="label" {...axis} axisLine={{ stroke: cAxisLine }} tickLine={false} interval="preserveStartEnd" minTickGap={14} />
+                      <YAxis {...axis} axisLine={false} tickLine={false} width={46} domain={[0, "auto"]}
+                        tickFormatter={(v) => (v === 0 ? "€0" : "€" + (v / 1000).toFixed(1).replace(".0", "") + "k")} />
+                      <Tooltip {...tip} cursor={{ stroke: cAxisLine }} />
+                      <Legend wrapperStyle={{ fontSize: 11, color: "#8A909C" }} />
+                      <ReferenceLine y={goalTarget} ifOverflow="extendDomain" stroke="#C9A24A" strokeDasharray="4 4"
+                        label={{ value: "Target", position: "insideTopLeft", fill: "#C9A24A", fontSize: 11 }} />
+                      <Line type="monotone" dataKey="actual" name="Actual" stroke="#7FB3A6" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                      <Line type="monotone" dataKey="projected" name="Projected" stroke="#9B8AC4" strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                {goalProjEnd != null && (
+                  <div className="bt-muted bt-tiny" style={{ marginTop: 6 }}>
+                    From this month's balance, the dashed line adds the planned {fmt(goalPlanned)}/month at each payday still to come and ends at {fmt(goalProjEnd)} by the deadline
+                    {goalProjEnd >= goalTarget ? " — on track for the target." : ` — ${fmt(goalTarget - goalProjEnd)} short of the target.`}
+                  </div>
+                )}
+              </>
+            )}
             <div className="bt-recon bt-mono">
               <div><span className="bt-muted">Still to go</span><strong>{fmt(goalRemaining)}</strong></div>
               <div><span className="bt-muted">Months left</span><strong>{goalMonthsLeft}</strong></div>
@@ -1905,21 +1963,26 @@ function Insights({ state, calc, update, theme, isLocked }) {
               <div className="bt-recon-flag warn">Planned Holiday Fund contribution is {fmt(goalPlanned)}/month — {fmt(Math.abs(goalGap))} short. Raise it by about {fmt(Math.abs(goalGap))} to hit the goal.</div>
             )}
             <div className="bt-muted bt-tiny" style={{ marginTop: 8 }}>
-              Balance is the Holiday Fund in Wealth for {monthMeta(state.current).label}. This month counts as still to come, so update the balance first. Interest is not included.
+              Balance is the Holiday Fund in Wealth for {monthMeta(state.current).label}. Months left is the paydays still to come, from this month to the deadline month, so keep the balance up to date. Interest is not included.
             </div>
             {!isLocked && (editGoal ? (
-              <div className="bt-snap-save">
-                <div className="bt-amount-in sm" style={{ width: "auto", flex: 1 }}>
+              <div className="bt-edit" style={{ marginTop: 12 }}>
+                <label className="bt-field-l bt-mono" style={{ margin: "0 0 2px" }}>Target</label>
+                <div className="bt-amount-in sm" style={{ width: "auto" }}>
                   <span>€</span>
                   <input className="bt-input bt-mono" type="number" inputMode="decimal" value={goalInput}
                     onFocus={(e) => e.target.select()} onChange={(e) => setGoalInput(e.target.value)} />
                 </div>
-                <button type="button" className="bt-savebtn" onClick={saveGoal}>Save</button>
-                <button type="button" className="bt-done" onClick={() => setEditGoal(false)}>Cancel</button>
+                <label className="bt-field-l bt-mono" style={{ margin: "6px 0 2px" }}>Deadline (end of month)</label>
+                <input className="bt-input bt-mono" type="month" value={goalDeadlineInput} onChange={(e) => setGoalDeadlineInput(e.target.value)} />
+                <div className="bt-edit-row" style={{ marginTop: 4 }}>
+                  <button type="button" className="bt-savebtn" onClick={saveGoal}>Save</button>
+                  <button type="button" className="bt-done" onClick={() => setEditGoal(false)}>Cancel</button>
+                </div>
               </div>
             ) : (
-              <button type="button" className="bt-add-cat" onClick={() => { setGoalInput(String(goalTarget)); setEditGoal(true); }}>
-                <PencilLine size={14} /> Edit target
+              <button type="button" className="bt-add-cat" onClick={() => { setGoalInput(String(goalTarget)); setGoalDeadlineInput(goal.deadline); setEditGoal(true); }}>
+                <PencilLine size={14} /> Edit target &amp; deadline
               </button>
             ))}
           </section>
