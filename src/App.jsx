@@ -182,6 +182,12 @@ function todayMonthId() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
+// Number of budget months from `fromId` through `toId`, counting both ends (0 if toId is earlier).
+function monthsThrough(fromId, toId) {
+  const [fy, fm] = fromId.split("-").map(Number);
+  const [ty, tm] = toId.split("-").map(Number);
+  return Math.max((ty - fy) * 12 + (tm - fm) + 1, 0);
+}
 
 // Planned amount for a category in a given month. Locked months use the amounts
 // saved when they were locked (so later plan changes don't rewrite history);
@@ -550,6 +556,16 @@ function migrate(state) {
       }
     }
     s = { ...s, months, suggestionDismissals: s.suggestionDismissals || {}, migratedSuggestionsV14: true };
+  }
+
+  // V15: savings goals (additive). Holiday Fund goal: €15,000 by the end of Sept 2027.
+  // Only adds the field when it is missing; never overwrites a target the user has edited.
+  if (!s.migratedGoalsV15) {
+    s = {
+      ...s,
+      goals: s.goals || { holiday: { target: 15000, deadline: "2027-09", accountId: "acc-holiday" } },
+      migratedGoalsV15: true,
+    };
   }
 
   return s;
@@ -1562,6 +1578,8 @@ function Insights({ state, calc, update, theme, isLocked }) {
   const [snapDate, setSnapDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [showReport, setShowReport] = useState(false);
   const [confirmDismiss, setConfirmDismiss] = useState(null); // category id awaiting dismiss confirmation
+  const [editGoal, setEditGoal] = useState(false);
+  const [goalInput, setGoalInput] = useState("");
 
   const saveSnapshot = () =>
     update((s) => {
@@ -1724,6 +1742,28 @@ function Insights({ state, calc, update, theme, isLocked }) {
   // per-month planned amounts, archive-aware, dismissals respected.
   const suggestions = computeSuggestions(state, state.current);
 
+  // Holiday Fund goal: balance of the Holiday Fund account in the viewed month vs the target.
+  // Months left counts the viewed month through the deadline month. The planned contribution is
+  // the Holiday Fund category's planned amount for the viewed month (saved amount if locked).
+  const goal = state.goals?.holiday;
+  const goalAcc = goal ? (state.accounts.find((a) => a.id === goal.accountId) || state.accounts.find((a) => !a.liquid && /holiday/i.test(a.name))) : null;
+  const goalCat = state.categories.find((c) => /holiday/i.test(c.name) && !isArchivedIn(c, state.current));
+  const goalBal = goalAcc ? (m.balances[goalAcc.id] || 0) : 0;
+  const goalTarget = goal?.target || 0;
+  const goalRemaining = Math.max(goalTarget - goalBal, 0);
+  const goalPct = goalTarget > 0 ? Math.min(goalBal / goalTarget, 1) : 0;
+  const goalMonthsLeft = goal ? monthsThrough(state.current, goal.deadline) : 0;
+  const goalNeeds = goalMonthsLeft > 0 ? Math.ceil(goalRemaining / goalMonthsLeft) : null;
+  const goalPlanned = goalCat ? plannedFor(state, state.current, goalCat) : null;
+  const goalGap = goalNeeds != null && goalPlanned != null ? goalPlanned - goalNeeds : null; // +ve = covered, −ve = short
+  const saveGoal = () => {
+    if (isLocked) return;
+    const t = parseFloat(goalInput);
+    if (!(t > 0)) return;
+    update((s) => ({ ...s, goals: { ...(s.goals || {}), holiday: { ...(s.goals?.holiday || {}), target: t } } }));
+    setEditGoal(false);
+  };
+
   // longer-term rollups
   const sumRange = (arr) => arr.reduce((o, x) => ({ income: o.income + x.income, expenses: o.expenses + x.expenses }), { income: 0, expenses: 0 });
   const rollup = (n) => {
@@ -1834,6 +1874,57 @@ function Insights({ state, calc, update, theme, isLocked }) {
           )}
         </section>
       </div>
+
+      {goal && (
+        <div className="bt-insrow">
+          {/* HOLIDAY FUND GOAL */}
+          <section className="bt-card">
+            <div className="bt-card-h">Holiday Fund goal<span className="bt-muted bt-mono"> · by end of {monthMeta(goal.deadline).label}</span></div>
+            <div className="bt-group-nums bt-mono">
+              <strong>{fmt(goalBal)}</strong> <span className="bt-muted">of {fmt(goalTarget)}</span>
+            </div>
+            <div className="bt-track">
+              <div className="bt-track-fill" style={{ width: `${goalPct * 100}%`, background: "var(--under)" }} />
+            </div>
+            <div className="bt-recon bt-mono">
+              <div><span className="bt-muted">Still to go</span><strong>{fmt(goalRemaining)}</strong></div>
+              <div><span className="bt-muted">Months left</span><strong>{goalMonthsLeft}</strong></div>
+              <div><span className="bt-muted">Needs / month</span><strong>{goalNeeds == null ? "—" : fmt(goalNeeds)}</strong></div>
+            </div>
+            {!goalAcc ? (
+              <div className="bt-recon-flag warn">No Holiday Fund account found in Wealth, so the balance shows as €0.</div>
+            ) : goalRemaining <= 0 ? (
+              <div className="bt-recon-flag ok">Goal reached — the Holiday Fund balance has hit the target.</div>
+            ) : goalNeeds == null ? (
+              <div className="bt-recon-flag warn">The deadline has passed — {fmt(goalRemaining)} still to go.</div>
+            ) : goalPlanned == null ? (
+              <div className="bt-recon-flag warn">No Holiday Fund category found in the plan, so there is nothing to compare against.</div>
+            ) : goalGap >= 0 ? (
+              <div className="bt-recon-flag ok">Planned Holiday Fund contribution is {fmt(goalPlanned)}/month — covers it ({fmtSigned(goalGap)} spare).</div>
+            ) : (
+              <div className="bt-recon-flag warn">Planned Holiday Fund contribution is {fmt(goalPlanned)}/month — {fmt(Math.abs(goalGap))} short. Raise it by about {fmt(Math.abs(goalGap))} to hit the goal.</div>
+            )}
+            <div className="bt-muted bt-tiny" style={{ marginTop: 8 }}>
+              Balance is the Holiday Fund in Wealth for {monthMeta(state.current).label}. This month counts as still to come, so update the balance first. Interest is not included.
+            </div>
+            {!isLocked && (editGoal ? (
+              <div className="bt-snap-save">
+                <div className="bt-amount-in sm" style={{ width: "auto", flex: 1 }}>
+                  <span>€</span>
+                  <input className="bt-input bt-mono" type="number" inputMode="decimal" value={goalInput}
+                    onFocus={(e) => e.target.select()} onChange={(e) => setGoalInput(e.target.value)} />
+                </div>
+                <button type="button" className="bt-savebtn" onClick={saveGoal}>Save</button>
+                <button type="button" className="bt-done" onClick={() => setEditGoal(false)}>Cancel</button>
+              </div>
+            ) : (
+              <button type="button" className="bt-add-cat" onClick={() => { setGoalInput(String(goalTarget)); setEditGoal(true); }}>
+                <PencilLine size={14} /> Edit target
+              </button>
+            ))}
+          </section>
+        </div>
+      )}
 
       <div className="bt-insrow">
         {/* INCOME VS EXPENSES */}
